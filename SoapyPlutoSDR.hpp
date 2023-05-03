@@ -9,17 +9,25 @@
 #include <SoapySDR/Types.hpp>
 #include <SoapySDR/Formats.hpp>
 
-typedef enum plutosdrStreamFormat {
-	PLUTO_SDR_CF32,
-	PLUTO_SDR_CS16,
-	PLUTO_SDR_CS12,
-	PLUTO_SDR_CS8
-} plutosdrStreamFormat;
+#ifdef HAS_LIBUSB1
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#include <libusb.h>
+#pragma GCC diagnostic pop
+#endif
 
-class rx_streamer {
+#include "PlutoSDR_StreamFormat.hpp"
+#include "PlutoSDR_RXStreamer.hpp"
+#include "PlutoSDR_TXStreamer.hpp"
+#ifdef HAS_LIBUSB1
+#include "PlutoSDR_RXStreamerUSBGadget.hpp"
+#include "PlutoSDR_TXStreamerUSBGadget.hpp"
+#endif
+
+class rx_streamer_iio : public rx_streamer {
 	public:
-		rx_streamer(const iio_device *dev, const plutosdrStreamFormat format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args);
-		~rx_streamer();
+		rx_streamer_iio(const iio_device *dev, const plutosdrStreamFormat format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args);
+		~rx_streamer_iio();
 		size_t recv(void * const *buffs,
 				const size_t numElems,
 				int &flags,
@@ -30,7 +38,7 @@ class rx_streamer {
 				const size_t numElems);
 
 		int stop(const int flags,
-				const long long timeNs=100000);
+				const long long timeNs);
 
 		void set_buffer_size_by_samplerate(const size_t _samplerate);
 
@@ -56,14 +64,25 @@ class rx_streamer {
 
 };
 
-class tx_streamer {
+class tx_streamer_iio : public tx_streamer {
 
 	public:
-		tx_streamer(const iio_device *dev, const plutosdrStreamFormat format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args);
-		~tx_streamer();
+		tx_streamer_iio(const iio_device *dev, const plutosdrStreamFormat format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args);
+		~tx_streamer_iio();
 		int send(const void * const *buffs,const size_t numElems,int &flags,const long long timeNs,const long timeoutUs );
-		int flush();
-
+		int flush(const long timeoutUs);
+		int start(const int flags,
+				  const long long timeNs,
+				  const size_t numElems) {
+			return 0;
+		}
+		int stop(const int flags,
+				 const long long timeNs) {
+			return flush(0);
+		}
+		size_t get_mtu_size() {
+			return 4096;
+		}
 	private:
 		int send_buf();
 		bool has_direct_copy();
@@ -299,6 +318,10 @@ class SoapyPlutoSDR : public SoapySDR::Device{
 
 		SoapySDR::RangeList getSampleRateRange(const int direction, const size_t channel) const;
 
+		bool hasHardwareTime(const std::string &what) const;
+		long long getHardwareTime(const std::string &what) const;
+		void setHardwareTime(const long long timeNs, const std::string &what);
+
 	private:
 
         bool IsValidRxStreamHandle(SoapySDR::Stream* handle) const;
@@ -321,6 +344,13 @@ class SoapyPlutoSDR : public SoapySDR::Device{
 		std::unique_ptr<rx_streamer> rx_stream;
         std::unique_ptr<tx_streamer> tx_stream;
 
-        
+		#ifdef HAS_LIBUSB1
+		libusb_device_handle* usb_sdr_dev;
+		uint8_t usb_sdr_intfc_num, usb_sdr_ep_in, usb_sdr_ep_out;
+		void open_sdr_usb_gadget(void);
+		#endif
+
+		uint32_t timestamp_every;
+		void update_device_timestamp_every(struct iio_device *dev);
 };
 

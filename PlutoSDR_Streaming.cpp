@@ -115,7 +115,20 @@ SoapySDR::Stream *SoapyPlutoSDR::setupStream(
 		iio_channel_attr_write_bool(
 			iio_device_find_channel(dev, "altvoltage0", true), "powerdown", false); // Turn ON RX LO
 
-        this->rx_stream = std::unique_ptr<rx_streamer>(new rx_streamer (rx_dev, streamFormat, channels, args));
+		#ifdef HAS_LIBUSB1
+		if (this->usb_sdr_dev)
+		{
+			// Use usb streaming gadget
+			this->rx_stream = std::unique_ptr<rx_streamer>(new rx_streamer_usb_gadget (rx_dev,
+																					   this->usb_sdr_dev, this->usb_sdr_intfc_num, this->usb_sdr_ep_in,
+																					   streamFormat, channels, args, this->timestamp_every));
+		}
+		else
+		#endif
+		{
+			// Use IIO
+			this->rx_stream = std::unique_ptr<rx_streamer>(new rx_streamer_iio (rx_dev, streamFormat, channels, args));
+		}
 
         return reinterpret_cast<SoapySDR::Stream*>(this->rx_stream.get());
 	}
@@ -127,7 +140,20 @@ SoapySDR::Stream *SoapyPlutoSDR::setupStream(
 		iio_channel_attr_write_bool(
 			iio_device_find_channel(dev, "altvoltage1", true), "powerdown", false); // Turn ON TX LO
 
-        this->tx_stream = std::unique_ptr<tx_streamer>(new tx_streamer (tx_dev, streamFormat, channels, args));
+		#ifdef HAS_LIBUSB1
+		if (this->usb_sdr_dev)
+		{
+			// Use usb streaming gadget
+			this->tx_stream = std::unique_ptr<tx_streamer>(new tx_streamer_usb_gadget (tx_dev,
+																					   this->usb_sdr_dev, this->usb_sdr_intfc_num, this->usb_sdr_ep_out,
+																					   streamFormat, channels, args, this->timestamp_every));
+		}
+		else
+		#endif
+		{
+			// Use IIO
+			this->tx_stream = std::unique_ptr<tx_streamer>(new tx_streamer_iio (tx_dev, streamFormat, channels, args));
+		}
 
         return reinterpret_cast<SoapySDR::Stream*>(this->tx_stream.get());
 	}
@@ -173,7 +199,7 @@ size_t SoapyPlutoSDR::getStreamMTU( SoapySDR::Stream *handle) const
     }
 
 	if (IsValidTxStreamHandle(handle)) {
-		return 4096;
+		return this->tx_stream->get_mtu_size();
 	}
 
     return 0;
@@ -192,6 +218,10 @@ int SoapyPlutoSDR::activateStream(
 
     if (IsValidRxStreamHandle(handle)) {
         return this->rx_stream->start(flags, timeNs, numElems);
+    }
+
+    if (IsValidTxStreamHandle(handle)) {
+        return this->tx_stream->start(flags, timeNs, numElems);
     }
 
     return 0;
@@ -216,8 +246,7 @@ int SoapyPlutoSDR::deactivateStream(
         std::lock_guard<pluto_spin_mutex> lock(tx_device_mutex);
 
         if (IsValidTxStreamHandle(handle)) {
-            this->tx_stream->flush();
-            return 0;
+            return this->tx_stream->stop(flags, timeNs);
         }
     }
 
@@ -270,7 +299,7 @@ int SoapyPlutoSDR::readStreamStatus(
 	return SOAPY_SDR_NOT_SUPPORTED;
 }
 
-void rx_streamer::set_buffer_size_by_samplerate(const size_t samplerate) {
+void rx_streamer_iio::set_buffer_size_by_samplerate(const size_t samplerate) {
 
     //Adapt buffer size (= MTU) as a tradeoff to minimize readStream overhead but at
     //the same time allow realtime applications. Keep it a power of 2 which seems to be better.
@@ -294,7 +323,7 @@ void rx_streamer::set_buffer_size_by_samplerate(const size_t samplerate) {
     set_mtu_size(this->buffer_size);
 }
 
-void rx_streamer::set_mtu_size(const size_t mtu_size) {
+void rx_streamer_iio::set_mtu_size(const size_t mtu_size) {
 
     this->mtu_size = mtu_size;
 
@@ -302,7 +331,7 @@ void rx_streamer::set_mtu_size(const size_t mtu_size) {
 }
 
 
-rx_streamer::rx_streamer(const iio_device *_dev, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args):
+rx_streamer_iio::rx_streamer_iio(const iio_device *_dev, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args):
 	dev(_dev), buffer_size(DEFAULT_RX_BUFFER_SIZE), buf(nullptr), format(_format), mtu_size(DEFAULT_RX_BUFFER_SIZE)
 
 {
@@ -344,7 +373,7 @@ rx_streamer::rx_streamer(const iio_device *_dev, const plutosdrStreamFormat _for
 	}
 }
 
-rx_streamer::~rx_streamer()
+rx_streamer_iio::~rx_streamer_iio()
 {
 	if (buf) {
         iio_buffer_cancel(buf);
@@ -359,7 +388,7 @@ rx_streamer::~rx_streamer()
 
 }
 
-size_t rx_streamer::recv(void * const *buffs,
+size_t rx_streamer_iio::recv(void * const *buffs,
 		const size_t numElems,
 		int &flags,
 		long long &timeNs,
@@ -490,7 +519,7 @@ size_t rx_streamer::recv(void * const *buffs,
 
 }
 
-int rx_streamer::start(const int flags,
+int rx_streamer_iio::start(const int flags,
 		const long long timeNs,
 		const size_t numElems)
 {
@@ -513,7 +542,7 @@ int rx_streamer::start(const int flags,
 
 }
 
-int rx_streamer::stop(const int flags,
+int rx_streamer_iio::stop(const int flags,
 		const long long timeNs)
 {
     //cancel first
@@ -533,7 +562,7 @@ int rx_streamer::stop(const int flags,
 
 }
 
-void rx_streamer::set_buffer_size(const size_t _buffer_size){
+void rx_streamer_iio::set_buffer_size(const size_t _buffer_size){
 
 	if (!buf || this->buffer_size != _buffer_size) {
         //cancel first
@@ -559,12 +588,12 @@ void rx_streamer::set_buffer_size(const size_t _buffer_size){
 	this->buffer_size=_buffer_size;
 }
 
-size_t rx_streamer::get_mtu_size() {
+size_t rx_streamer_iio::get_mtu_size() {
     return this->mtu_size;
 }
 
 // return wether can we optimize for single RX, 2 channel (I/Q), same endianess direct copy
-bool rx_streamer::has_direct_copy()
+bool rx_streamer_iio::has_direct_copy()
 {
 	if (channel_list.size() != 2) // one RX with I + Q
 		return false;
@@ -585,7 +614,7 @@ bool rx_streamer::has_direct_copy()
 }
 
 
-tx_streamer::tx_streamer(const iio_device *_dev, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args) :
+tx_streamer_iio::tx_streamer_iio(const iio_device *_dev, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args) :
 	dev(_dev), format(_format), buf(nullptr)
 {
 
@@ -621,7 +650,7 @@ tx_streamer::tx_streamer(const iio_device *_dev, const plutosdrStreamFormat _for
 
 }
 
-tx_streamer::~tx_streamer(){
+tx_streamer_iio::~tx_streamer_iio(){
 
 	if (buf) { iio_buffer_destroy(buf); }
 
@@ -630,7 +659,7 @@ tx_streamer::~tx_streamer(){
 
 }
 
-int tx_streamer::send(	const void * const *buffs,
+int tx_streamer_iio::send(	const void * const *buffs,
 		const size_t numElems,
 		int &flags,
 		const long long timeNs,
@@ -746,12 +775,12 @@ int tx_streamer::send(	const void * const *buffs,
 
 }
 
-int tx_streamer::flush()
+int tx_streamer_iio::flush(const long timeoutUs)
 {
 	return send_buf();
 }
 
-int tx_streamer::send_buf()
+int tx_streamer_iio::send_buf()
 {
     if (!buf) {
         return 0;
@@ -781,7 +810,7 @@ int tx_streamer::send_buf()
 }
 
 // return wether can we optimize for single TX, 2 channel (I/Q), same endianess direct copy
-bool tx_streamer::has_direct_copy()
+bool tx_streamer_iio::has_direct_copy()
 {
 
 	if (channel_list.size() != 2) // one TX with I/Q

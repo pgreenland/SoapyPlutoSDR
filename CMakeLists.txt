@@ -87,6 +87,12 @@ SOAPY_SDR_MODULE_UTIL(
     LIBRARIES ${LibIIO_LIBRARIES} ${LibAD9361_LIBRARIES} ${LibUSB_LIBRARIES}
 )
 
+if(LibUSB_FOUND)
+    # add usb streamer gadget
+    target_sources(PlutoSDRSupport PRIVATE PlutoSDR_RXStreamerUSBGadget.cpp)
+    target_sources(PlutoSDRSupport PRIVATE PlutoSDR_TXStreamerUSBGadget.cpp)
+endif()
+
 ########################################################################
 # uninstall target
 ########################################################################

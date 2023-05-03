@@ -2,8 +2,19 @@
 #ifdef HAS_AD9361_IIO
 #include <ad9361.h>
 #endif
+#ifdef HAS_LIBUSB1
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#include <libusb.h>
+#pragma GCC diagnostic pop
+#endif
+
+#include <string.h>
 
 static iio_context *ctx = nullptr; 
+#ifdef HAS_LIBUSB1
+static libusb_context *usb_ctx = nullptr;
+#endif
 
 SoapyPlutoSDR::SoapyPlutoSDR( const SoapySDR::Kwargs &args ):
 	dev(nullptr), rx_dev(nullptr),tx_dev(nullptr), decimation(false), interpolation(false), rx_stream(nullptr)
@@ -44,6 +55,106 @@ SoapyPlutoSDR::SoapyPlutoSDR( const SoapySDR::Kwargs &args ):
 	this->setAntenna(SOAPY_SDR_RX, 0, "A_BALANCED");
 	this->setGainMode(SOAPY_SDR_RX, 0, false);
 	this->setAntenna(SOAPY_SDR_TX, 0, "A");
+
+	// Set / reset loopback mode
+	int loopback = 0;
+	if (args.count("loopback") != 0) {
+		try {
+			loopback = std::stoi(args.at("loopback"));
+		} catch (...) {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for loopback, expected number");
+			throw std::runtime_error("invalid value for loopback, expected number");
+		}
+		if (loopback < 0 || loopback > 2) {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for loopback, expected 0-2");
+			throw std::runtime_error("invalid value for loopback, expected 0-2");
+		}
+	}
+	switch (loopback) {
+		case 1: {
+			SoapySDR_logf(SOAPY_SDR_INFO, "digital loopback enabled");
+			break;
+		}
+		case 2: {
+			SoapySDR_logf(SOAPY_SDR_INFO, "analog loopback enabled");
+			break;
+		}
+	}
+	int rc = iio_device_debug_attr_write_longlong(dev, "loopback", loopback);
+	if (rc < 0) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to set loopback mode (%d)", rc);
+		throw std::runtime_error("failed to set loopback mode");
+	}
+
+	#ifdef HAS_LIBUSB1
+	// Assume not using direct mode
+	this->usb_sdr_dev = nullptr;
+	#endif
+
+	if (args.count("usb_direct") != 0) {
+		#ifdef HAS_LIBUSB1
+		if (args.at("usb_direct") == "1") {
+			// check if usb direct buffer access is available, aka we're connected via usb
+			if (0 != strcmp(iio_context_get_name(ctx), "usb")) {
+				SoapySDR_logf(SOAPY_SDR_ERROR, "usb_direct is only available when connected via USB");
+				throw std::runtime_error("usb_direct is only available when connected via USB");
+			}
+
+			// Init libusb
+			if (usb_ctx == nullptr) {
+				int rc = libusb_init(&usb_ctx);
+				if (rc < 0) {
+					SoapySDR_logf(SOAPY_SDR_ERROR, "libusb init error (%d)", rc);
+					throw std::runtime_error("libusb init error");
+				}
+			}
+
+			// Open usb device
+			this->open_sdr_usb_gadget();
+
+			// Notify usb direct mode in use
+			SoapySDR_logf(SOAPY_SDR_INFO, "USB direct mode enabled!");
+		}
+		else if (args.at("usb_direct") == "0") {
+			// default value
+		} else {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for usb_direct, expected 0/1");
+			throw std::runtime_error("invalid value for usb_direct, expected 0/1");
+		}
+		#else
+		SoapySDR_logf(SOAPY_SDR_ERROR, "usb_direct is only available when build with LIBUSB");
+		throw std::runtime_error("usb_direct is only available when build with LIBUSB");
+		#endif
+	}
+
+	// Assume timestamps disabled
+	this->timestamp_every = 0;
+
+	if (args.count("timestamp_every") != 0) {
+		try {
+			this->timestamp_every = std::stoul(args.at("timestamp_every"));
+			SoapySDR_logf(SOAPY_SDR_INFO, "timestamping enabled, every %u samples", timestamp_every);
+		} catch (...) {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for timestamp_every, expected number");
+			throw std::runtime_error("invalid value for timestamp_every, expected number");
+		}
+	}
+
+	// Check timestamp every is only asserted with usb_direct for now
+	if (this->timestamp_every > 0) {
+		#ifdef HAS_LIBUSB1
+		if (!this->usb_sdr_dev) {
+		#else
+		{
+		#endif
+			SoapySDR_logf(SOAPY_SDR_ERROR, "timestamp_every only currently supported with usb_direct");
+			throw std::runtime_error("timestamp_every only currently supported with usb_direct");
+		}
+	}
+
+	// Set ADC and DAC timestamp_every
+	this->update_device_timestamp_every(rx_dev);
+	this->update_device_timestamp_every(tx_dev);
 }
 
 SoapyPlutoSDR::~SoapyPlutoSDR(void){
@@ -66,7 +177,17 @@ SoapyPlutoSDR::~SoapyPlutoSDR(void){
 		ctx = nullptr;
 	}
 
+	if(this->usb_sdr_dev)
+	{
+		libusb_close(this->usb_sdr_dev);
+		this->usb_sdr_dev = nullptr;
+	}
 
+	if(usb_ctx)
+	{
+		libusb_exit(usb_ctx);
+		usb_ctx = nullptr;
+	}
 }
 
 /*******************************************************************
@@ -717,3 +838,175 @@ std::vector<double> SoapyPlutoSDR::listBandwidths( const int direction, const si
 	return(options);
 
 }
+
+/*******************************************************************
+ * Time API
+ ******************************************************************/
+
+bool SoapyPlutoSDR::hasHardwareTime(const std::string &what) const
+{
+	return (this->timestamp_every > 0);
+}
+
+long long SoapyPlutoSDR::getHardwareTime(const std::string &what) const
+{
+	throw std::runtime_error("SoapyPlutoSDR::getHardwareTime() not yet implemented");
+}
+
+void SoapyPlutoSDR::setHardwareTime(const long long timeNs, const std::string &what)
+{
+	throw std::runtime_error("SoapyPlutoSDR::setHardwareTime() not yet implemented");
+}
+
+/*******************************************************************
+ * Helpers
+ ******************************************************************/
+
+void SoapyPlutoSDR::update_device_timestamp_every(struct iio_device *dev)
+{
+	// Read current ADC GPIO output value, which controls decimator and ADC timestamp setting
+	uint32_t temp_reg_val;
+	if (iio_device_reg_read(dev, 0x800000BC, &temp_reg_val) < 0) {
+		// Failed to read GPIO register
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to read timestamp_every setting");
+		throw std::runtime_error("failed to read timestamp_every setting");
+	}
+
+	// ADC/DAC data bus in the pluto is 64-bit wide. With I/Q channels enabled for one channel
+	// each sample is 2 * 16-bit. Therefore 2 samples will be carried in each 64-bit value.
+	// Timestamps are applied every x samples on the 64-bit bus. Therefore we divide the
+	// requested timestamp every value by 2.
+	// The 32-bit GPIO register is divided into timestamp_every [31:1] and decimator/interpolator enable [0:0]
+	// therefore we mask off the old bits and or in the new bits, shifting them into place.
+	temp_reg_val &= ~0x1; // Mask off all but lowest bit
+	temp_reg_val |= ((this->timestamp_every / 2) << 1);
+
+	// Write new ADC GPIO output value.
+	if (iio_device_reg_write(dev, 0x800000BC, temp_reg_val) < 0) {
+		// Failed to write GPIO register
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to write timestamp_every setting");
+		throw std::runtime_error("failed to write timestamp_every setting");
+	}
+}
+
+#ifdef HAS_LIBUSB1
+void SoapyPlutoSDR::open_sdr_usb_gadget(void)
+{
+	// Retrieve url and separate bus / device
+	const char *uri = iio_context_get_attr_value(ctx, "uri");
+	if (!uri) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to retrieve uri from iio");
+		throw std::runtime_error("failed to retrieve uri from iio");
+	}
+
+	// Retrieve bus and device number from uri
+	unsigned short int bus_num, dev_addr;
+	if (2 != std::sscanf(uri, "usb:%hu.%hu", &bus_num, &dev_addr)) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to extract usb bus and device address from uri");
+		throw std::runtime_error("failed to extract usb bus and device address from uri");
+	}
+
+	// Retrieve device list
+	struct libusb_device **devs;
+	int dev_count = libusb_get_device_list(usb_ctx, &devs);
+	if (dev_count < 0) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "libusb get device list error (%d)", dev_count);
+		throw std::runtime_error("libusb get device list error");
+	}
+
+	// Iterate over devices
+	for (int i = 0; i < dev_count; i++) {
+		struct libusb_device *dev = devs[i];
+
+		// Check device bus and address
+		if (	(libusb_get_bus_number(dev) == bus_num)
+			 && (libusb_get_device_address(dev) == dev_addr)
+		   ) {
+				// Found device, open it
+				int rc = libusb_open(dev, &this->usb_sdr_dev);
+				if (rc < 0) {
+					// Failed to open device
+					SoapySDR_logf(SOAPY_SDR_ERROR, "libusb failed to open device (%d)", rc);
+					this->usb_sdr_dev = nullptr;
+				}
+				break;
+		}
+	}
+
+	// Free list, reducing device reference counts
+	libusb_free_device_list(devs, 1);
+
+	// Check handle
+	if (!this->usb_sdr_dev) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to open sdr_usb_gadget");
+		throw std::runtime_error("failed to open sdr_usb_gadget");
+	}
+
+	// Retrieve active config descriptor
+	struct libusb_config_descriptor *config;
+	int rc = libusb_get_active_config_descriptor(libusb_get_device(this->usb_sdr_dev), &config);
+	if (rc < 0) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to get usb device descriptor (%d)", rc);
+		throw std::runtime_error("failed to get usb device descriptor");
+	}
+
+	// Loop through interfaces and find one with the desired name
+	int interface_num = -1;
+	for (int i = 0; i < config->bNumInterfaces; i++) {
+		const struct libusb_interface *iface = &config->interface[i];
+
+		for (int j = 0; j < iface->num_altsetting; j++) {
+			const struct libusb_interface_descriptor *desc = &iface->altsetting[j];
+
+			// Get the interface name
+			char name[128];
+			rc = libusb_get_string_descriptor_ascii(this->usb_sdr_dev, desc->iInterface, (unsigned char*)name, sizeof(name));
+			if (rc < 0) {
+				SoapySDR_logf(SOAPY_SDR_ERROR, "failed to get usb device interface name (%d)", rc);
+				throw std::runtime_error("failed to get usb device interface name");
+			}
+
+			if (0 == strcmp(name, "sdrgadget")) {
+				// Capture interface number
+				interface_num = desc->bInterfaceNumber;
+
+				// Capture endpoint addresses
+				for (int k = 0; k < desc->bNumEndpoints; k++) {
+					const struct libusb_endpoint_descriptor *ep_desc = &desc->endpoint[k];
+					if (ep_desc->bEndpointAddress & 0x80)
+					{
+						this->usb_sdr_ep_in = ep_desc->bEndpointAddress;
+					}
+					else
+					{
+						this->usb_sdr_ep_out = ep_desc->bEndpointAddress;
+					}
+				}
+
+				// All done
+				break;
+			}
+		}
+	}
+
+	// Free the configuration descriptor
+	libusb_free_config_descriptor(config);
+	config = nullptr;
+
+	if (interface_num < 0)
+	{
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to find usb device interface");
+		throw std::runtime_error("failed to find usb device interface");
+	}
+
+	// Store interface number
+	this->usb_sdr_intfc_num = (uint8_t)interface_num;
+
+	// Claim the interface
+	rc = libusb_claim_interface(this->usb_sdr_dev, this->usb_sdr_intfc_num);
+	if (rc < 0) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to claim usb device interface (%d)", rc);
+		throw std::runtime_error("failed to claim usb device interface");
+	}
+}
+#endif
