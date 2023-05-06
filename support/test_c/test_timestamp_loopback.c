@@ -72,7 +72,11 @@ int main(void)
 
     //create buffers for samples (unsigned signed int16's - although we're transmitting and receiving signed numbers)
     //double size for I and Q samples
-    uint16_t rx_buff[sample_count][2*rx_mtu];
+    uint16_t* rx_buff[sample_count];
+    for (size_t i = 0; i < sample_count; i++)
+    {
+        rx_buff[i] = malloc(sizeof(uint16_t)*2*rx_mtu);
+    }
     long long rx_timestamps[sample_count];
     uint16_t tx_buff[2*tx_mtu];
     long long tx_timestamps[sample_count];
@@ -226,6 +230,13 @@ int main(void)
 
     //all done
     printf("test complete!\n");
+
+    //free buffers
+    for (size_t i = 0; i < sample_count; i++)
+    {
+        free(rx_buff[i]);
+        rx_buff[i] = NULL;
+    }
 
     return EXIT_SUCCESS;
 }
