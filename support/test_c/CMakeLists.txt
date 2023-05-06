@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 2.8.9)
 
-project(test)
+project(test_timestamp_loopback)
 
 find_package(SoapySDR REQUIRED)
 
@@ -10,6 +10,6 @@ if (SoapySDR_FOUND)
     message(STATUS "SoapySDR_DEFINITIONS: ${SoapySDR_DEFINITIONS}")
 endif()
 
-add_executable(test main.c)
+add_executable(test_timestamp_loopback test_timestamp_loopback.c)
 
-target_link_libraries(test ${SoapySDR_LIBRARIES})
+target_link_libraries(test_timestamp_loopback ${SoapySDR_LIBRARIES})
