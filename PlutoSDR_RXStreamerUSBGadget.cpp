@@ -397,11 +397,10 @@ void rx_streamer_usb_gadget::_start(void)
 		thread = std::thread(&rx_streamer_usb_gadget::thread_func, this, enabled_channels, buffer_size_samples);
 
 		// Attempt to increase thread priority
-		int min_prio = sched_get_priority_min(SCHED_RR);
 		int max_prio = sched_get_priority_max(SCHED_RR);
-		if (min_prio >= 0 && max_prio >= 0) {
+		if (max_prio >= 0) {
 			sched_param sch;
-			sch.sched_priority = (min_prio + max_prio) / 2;
+			sch.sched_priority = max_prio;
 			if (int rc = pthread_setschedparam(thread.native_handle(), SCHED_RR, &sch)) {
 				SoapySDR_logf(SOAPY_SDR_WARNING, "Failed to set RX thread priority (%d)", rc);
 			}
