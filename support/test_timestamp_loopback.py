@@ -45,7 +45,7 @@ def main():
     #create a re-usable buffers for samples (unsigned signed int16's - although we're transmitting and receiving signed numbers)
     #double size for I and Q samples
     rx_buff = numpy.array([0]*2*rx_mtu, numpy.ushort)
-    tx_buff = numpy.array([0]*2*rx_mtu, numpy.ushort)
+    tx_buff = numpy.array([0]*2*tx_mtu, numpy.ushort)
 
     #prepare fixed bytes in transmit buffer
     #we transmit a pattern of FFFF FFFF [TS_0]00 [TS_1]00 [TS_2]00 [TS_3]00 [TS_4]00 [TS_5]00 [TS_6]00 [TS_7]00 FFFF FFFF
@@ -214,7 +214,8 @@ def extract_timestamp(rx_buff):
 
         elif state == States.VALUE:
             # Extract value
-            extracted_value = (int(rx_buff[i]) << 56 | (extracted_value >> 8))
+            extracted_value |= int(rx_buff[i]) << (count * 8)
+
             if count == 0:
                 # Capture word offset of data
                 extracted_offset = i
