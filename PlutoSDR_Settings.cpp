@@ -870,9 +870,9 @@ void SoapyPlutoSDR::handle_timestamp_every_arg(const SoapySDR::Kwargs & args, bo
 	if (args.count("timestamp_every") != 0) {
 		try {
 			new_timestamp_every = std::stoul(args.at("timestamp_every"));
-			SoapySDR_logf(SOAPY_SDR_INFO, "%s timestamping enabled, every %u samples", tx ? "tx" : "rx", new_timestamp_every);
+			SoapySDR_logf(SOAPY_SDR_INFO, "%s timestamping enabled, every %u samples", tx ? "TX" : "RX", new_timestamp_every);
 		} catch (...) {
-			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for %s timestamp_every, expected number", tx ? "tx" : "rx");
+			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for %s timestamp_every, expected number", tx ? "TX" : "RX");
 			throw std::runtime_error("invalid value for timestamp_every, expected number");
 		}
 	}
