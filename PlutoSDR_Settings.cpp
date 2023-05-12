@@ -61,6 +61,9 @@ SoapyPlutoSDR::SoapyPlutoSDR( const SoapySDR::Kwargs &args ):
 	usb_sdr_dev = nullptr;
 	#endif
 
+	// Assume loopback unchanged
+	loopback = -1;
+
 	// Assume timestamps disabled
 	timestamp_every_tx = 0;
 	timestamp_every_rx = 0;
@@ -820,34 +823,42 @@ void SoapyPlutoSDR::handle_usb_direct_args(const SoapySDR::Kwargs & args)
 
 void SoapyPlutoSDR::handle_loopback_args(const SoapySDR::Kwargs & args)
 {
+	int new_loopback = -1;
+
 	// Set / reset loopback mode
-	int loopback = 0;
 	if (args.count("loopback") != 0) {
 		try {
-			loopback = std::stoi(args.at("loopback"));
+			new_loopback = std::stoi(args.at("loopback"));
 		} catch (...) {
 			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for loopback, expected number");
 			throw std::runtime_error("invalid value for loopback, expected number");
 		}
-		if (loopback < 0 || loopback > 2) {
+		if (new_loopback < 0 || new_loopback > 2) {
 			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for loopback, expected 0-2");
 			throw std::runtime_error("invalid value for loopback, expected 0-2");
 		}
 
-		switch (loopback) {
-			case 1: {
-				SoapySDR_logf(SOAPY_SDR_INFO, "digital loopback enabled");
-				break;
+		if (new_loopback != loopback) {
+			// Update required
+			switch (new_loopback) {
+				case 1: {
+					SoapySDR_logf(SOAPY_SDR_INFO, "digital loopback enabled");
+					break;
+				}
+				case 2: {
+					SoapySDR_logf(SOAPY_SDR_INFO, "analog loopback enabled");
+					break;
+				}
 			}
-			case 2: {
-				SoapySDR_logf(SOAPY_SDR_INFO, "analog loopback enabled");
-				break;
+
+			int rc = iio_device_debug_attr_write_longlong(dev, "loopback", new_loopback);
+			if (rc < 0) {
+				SoapySDR_logf(SOAPY_SDR_ERROR, "failed to set loopback mode (%d)", rc);
+				throw std::runtime_error("failed to set loopback mode");
 			}
-		}
-		int rc = iio_device_debug_attr_write_longlong(dev, "loopback", loopback);
-		if (rc < 0) {
-			SoapySDR_logf(SOAPY_SDR_ERROR, "failed to set loopback mode (%d)", rc);
-			throw std::runtime_error("failed to set loopback mode");
+
+			// Save new value
+			loopback = new_loopback;
 		}
 	}
 }

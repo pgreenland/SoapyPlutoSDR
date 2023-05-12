@@ -344,6 +344,7 @@ class SoapyPlutoSDR : public SoapySDR::Device{
 		std::unique_ptr<rx_streamer> rx_stream;
         std::unique_ptr<tx_streamer> tx_stream;
 
+		int loopback;
 		uint32_t timestamp_every_rx;
 		uint32_t timestamp_every_tx;
 
