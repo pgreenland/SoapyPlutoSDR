@@ -11,7 +11,7 @@
 
 #include <string.h>
 
-static iio_context *ctx = nullptr; 
+static iio_context *ctx = nullptr;
 #ifdef HAS_LIBUSB1
 static libusb_context *usb_ctx = nullptr;
 #endif
@@ -56,105 +56,20 @@ SoapyPlutoSDR::SoapyPlutoSDR( const SoapySDR::Kwargs &args ):
 	this->setGainMode(SOAPY_SDR_RX, 0, false);
 	this->setAntenna(SOAPY_SDR_TX, 0, "A");
 
-	// Set / reset loopback mode
-	int loopback = 0;
-	if (args.count("loopback") != 0) {
-		try {
-			loopback = std::stoi(args.at("loopback"));
-		} catch (...) {
-			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for loopback, expected number");
-			throw std::runtime_error("invalid value for loopback, expected number");
-		}
-		if (loopback < 0 || loopback > 2) {
-			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for loopback, expected 0-2");
-			throw std::runtime_error("invalid value for loopback, expected 0-2");
-		}
-	}
-	switch (loopback) {
-		case 1: {
-			SoapySDR_logf(SOAPY_SDR_INFO, "digital loopback enabled");
-			break;
-		}
-		case 2: {
-			SoapySDR_logf(SOAPY_SDR_INFO, "analog loopback enabled");
-			break;
-		}
-	}
-	int rc = iio_device_debug_attr_write_longlong(dev, "loopback", loopback);
-	if (rc < 0) {
-		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to set loopback mode (%d)", rc);
-		throw std::runtime_error("failed to set loopback mode");
-	}
-
 	#ifdef HAS_LIBUSB1
 	// Assume not using direct mode
-	this->usb_sdr_dev = nullptr;
+	usb_sdr_dev = nullptr;
 	#endif
 
-	if (args.count("usb_direct") != 0) {
-		#ifdef HAS_LIBUSB1
-		if (args.at("usb_direct") == "1") {
-			// check if usb direct buffer access is available, aka we're connected via usb
-			if (0 != strcmp(iio_context_get_name(ctx), "usb")) {
-				SoapySDR_logf(SOAPY_SDR_ERROR, "usb_direct is only available when connected via USB");
-				throw std::runtime_error("usb_direct is only available when connected via USB");
-			}
-
-			// Init libusb
-			if (usb_ctx == nullptr) {
-				int rc = libusb_init(&usb_ctx);
-				if (rc < 0) {
-					SoapySDR_logf(SOAPY_SDR_ERROR, "libusb init error (%d)", rc);
-					throw std::runtime_error("libusb init error");
-				}
-			}
-
-			// Open usb device
-			this->open_sdr_usb_gadget();
-
-			// Notify usb direct mode in use
-			SoapySDR_logf(SOAPY_SDR_INFO, "USB direct mode enabled!");
-		}
-		else if (args.at("usb_direct") == "0") {
-			// default value
-		} else {
-			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for usb_direct, expected 0/1");
-			throw std::runtime_error("invalid value for usb_direct, expected 0/1");
-		}
-		#else
-		SoapySDR_logf(SOAPY_SDR_ERROR, "usb_direct is only available when build with LIBUSB");
-		throw std::runtime_error("usb_direct is only available when build with LIBUSB");
-		#endif
-	}
-
 	// Assume timestamps disabled
-	this->timestamp_every = 0;
+	timestamp_every_tx = 0;
+	timestamp_every_rx = 0;
 
-	if (args.count("timestamp_every") != 0) {
-		try {
-			this->timestamp_every = std::stoul(args.at("timestamp_every"));
-			SoapySDR_logf(SOAPY_SDR_INFO, "timestamping enabled, every %u samples", timestamp_every);
-		} catch (...) {
-			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for timestamp_every, expected number");
-			throw std::runtime_error("invalid value for timestamp_every, expected number");
-		}
-	}
-
-	// Check timestamp every is only asserted with usb_direct for now
-	if (this->timestamp_every > 0) {
-		#ifdef HAS_LIBUSB1
-		if (!this->usb_sdr_dev) {
-		#else
-		{
-		#endif
-			SoapySDR_logf(SOAPY_SDR_ERROR, "timestamp_every only currently supported with usb_direct");
-			throw std::runtime_error("timestamp_every only currently supported with usb_direct");
-		}
-	}
-
-	// Set ADC and DAC timestamp_every
-	this->update_device_timestamp_every(rx_dev);
-	this->update_device_timestamp_every(tx_dev);
+	// Handle any arguments provided during device creation
+	handle_usb_direct_args(args);
+	handle_loopback_args(args);
+	handle_timestamp_every_arg(args, false);
+	handle_timestamp_every_arg(args, true);
 }
 
 SoapyPlutoSDR::~SoapyPlutoSDR(void){
@@ -464,7 +379,7 @@ void SoapyPlutoSDR::setAntenna( const int direction, const size_t channel, const
         std::lock_guard<pluto_spin_mutex> lock(tx_device_mutex);
 		iio_channel_attr_write(iio_device_find_channel(dev, "voltage0", true), "rf_port_select", name.c_str());
 
-	} 
+	}
 }
 
 
@@ -716,7 +631,7 @@ void SoapyPlutoSDR::setSampleRate( const int direction, const size_t channel, co
 
 #ifdef HAS_AD9361_IIO
 	if(ad9361_set_bb_rate(dev,(unsigned long)samplerate))
-		SoapySDR_logf(SOAPY_SDR_ERROR, "Unable to set BB rate.");	
+		SoapySDR_logf(SOAPY_SDR_ERROR, "Unable to set BB rate.");
 #endif
 
 }
@@ -734,7 +649,7 @@ double SoapyPlutoSDR::getSampleRate( const int direction, const size_t channel )
 	}
 
 	else if(direction==SOAPY_SDR_TX){
-        
+
         std::lock_guard<pluto_spin_mutex> lock(tx_device_mutex);
 
 		if(iio_channel_attr_read_longlong(iio_device_find_channel(tx_dev, "voltage0", true),"sampling_frequency",&samplerate)!=0)
@@ -845,7 +760,7 @@ std::vector<double> SoapyPlutoSDR::listBandwidths( const int direction, const si
 
 bool SoapyPlutoSDR::hasHardwareTime(const std::string &what) const
 {
-	return (this->timestamp_every > 0);
+	return ((timestamp_every_rx + timestamp_every_tx) > 0);
 }
 
 long long SoapyPlutoSDR::getHardwareTime(const std::string &what) const
@@ -862,30 +777,114 @@ void SoapyPlutoSDR::setHardwareTime(const long long timeNs, const std::string &w
  * Helpers
  ******************************************************************/
 
-void SoapyPlutoSDR::update_device_timestamp_every(struct iio_device *dev)
+void SoapyPlutoSDR::handle_usb_direct_args(const SoapySDR::Kwargs & args)
 {
-	// Read current ADC GPIO output value, which controls decimator and ADC timestamp setting
-	uint32_t temp_reg_val;
-	if (iio_device_reg_read(dev, 0x800000BC, &temp_reg_val) < 0) {
-		// Failed to read GPIO register
-		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to read timestamp_every setting");
-		throw std::runtime_error("failed to read timestamp_every setting");
+	if (args.count("usb_direct") != 0) {
+		#ifdef HAS_LIBUSB1
+		if (args.at("usb_direct") == "1") {
+			// check if usb direct buffer access is available, aka we're connected via usb
+			if (0 != strcmp(iio_context_get_name(ctx), "usb")) {
+				SoapySDR_logf(SOAPY_SDR_ERROR, "usb_direct is only available when connected via USB");
+				throw std::runtime_error("usb_direct is only available when connected via USB");
+			}
+
+			// Init libusb
+			if (usb_ctx == nullptr) {
+				int rc = libusb_init(&usb_ctx);
+				if (rc < 0) {
+					SoapySDR_logf(SOAPY_SDR_ERROR, "libusb init error (%d)", rc);
+					throw std::runtime_error("libusb init error");
+				}
+			}
+
+			if (!this->usb_sdr_dev) {
+				// Open usb device
+				this->open_sdr_usb_gadget();
+
+				// Notify usb direct mode in use
+				SoapySDR_logf(SOAPY_SDR_INFO, "USB direct mode enabled!");
+			}
+		}
+		else if (args.at("usb_direct") == "0") {
+			// default value
+		} else {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for usb_direct, expected 0/1");
+			throw std::runtime_error("invalid value for usb_direct, expected 0/1");
+		}
+		#else
+		SoapySDR_logf(SOAPY_SDR_ERROR, "usb_direct is only available when build with LIBUSB");
+		throw std::runtime_error("usb_direct is only available when build with LIBUSB");
+		#endif
+	}
+}
+
+void SoapyPlutoSDR::handle_loopback_args(const SoapySDR::Kwargs & args)
+{
+	// Set / reset loopback mode
+	int loopback = 0;
+	if (args.count("loopback") != 0) {
+		try {
+			loopback = std::stoi(args.at("loopback"));
+		} catch (...) {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for loopback, expected number");
+			throw std::runtime_error("invalid value for loopback, expected number");
+		}
+		if (loopback < 0 || loopback > 2) {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for loopback, expected 0-2");
+			throw std::runtime_error("invalid value for loopback, expected 0-2");
+		}
+
+		switch (loopback) {
+			case 1: {
+				SoapySDR_logf(SOAPY_SDR_INFO, "digital loopback enabled");
+				break;
+			}
+			case 2: {
+				SoapySDR_logf(SOAPY_SDR_INFO, "analog loopback enabled");
+				break;
+			}
+		}
+		int rc = iio_device_debug_attr_write_longlong(dev, "loopback", loopback);
+		if (rc < 0) {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "failed to set loopback mode (%d)", rc);
+			throw std::runtime_error("failed to set loopback mode");
+		}
+	}
+}
+
+void SoapyPlutoSDR::handle_timestamp_every_arg(const SoapySDR::Kwargs & args, bool tx)
+{
+	uint32_t new_timestamp_every = 0;
+
+	if (args.count("timestamp_every") != 0) {
+		try {
+			new_timestamp_every = std::stoul(args.at("timestamp_every"));
+			SoapySDR_logf(SOAPY_SDR_INFO, "%s timestamping enabled, every %u samples", tx ? "tx" : "rx", new_timestamp_every);
+		} catch (...) {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for %s timestamp_every, expected number", tx ? "tx" : "rx");
+			throw std::runtime_error("invalid value for timestamp_every, expected number");
+		}
 	}
 
-	// ADC/DAC data bus in the pluto is 64-bit wide. With I/Q channels enabled for one channel
-	// each sample is 2 * 16-bit. Therefore 2 samples will be carried in each 64-bit value.
-	// Timestamps are applied every x samples on the 64-bit bus. Therefore we divide the
-	// requested timestamp every value by 2.
-	// The 32-bit GPIO register is divided into timestamp_every [31:1] and decimator/interpolator enable [0:0]
-	// therefore we mask off the old bits and or in the new bits, shifting them into place.
-	temp_reg_val &= ~0x1; // Mask off all but lowest bit
-	temp_reg_val |= ((this->timestamp_every / 2) << 1);
+	// Check timestamp every is only asserted with usb_direct for now
+	if (new_timestamp_every > 0) {
+		#ifdef HAS_LIBUSB1
+		if (!this->usb_sdr_dev) {
+		#else
+		{
+		#endif
+			SoapySDR_logf(SOAPY_SDR_ERROR, "timestamp_every only currently supported with usb_direct");
+			throw std::runtime_error("timestamp_every only currently supported with usb_direct");
+		}
+	}
 
-	// Write new ADC GPIO output value.
-	if (iio_device_reg_write(dev, 0x800000BC, temp_reg_val) < 0) {
-		// Failed to write GPIO register
-		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to write timestamp_every setting");
-		throw std::runtime_error("failed to write timestamp_every setting");
+	// Set appropriate timestamp_every
+	if (tx) {
+		timestamp_every_tx = new_timestamp_every;
+		update_device_timestamp_every(tx_dev, timestamp_every_tx);
+	} else {
+		timestamp_every_rx = new_timestamp_every;
+		update_device_timestamp_every(rx_dev, timestamp_every_rx);
 	}
 }
 
@@ -1010,3 +1009,30 @@ void SoapyPlutoSDR::open_sdr_usb_gadget(void)
 	}
 }
 #endif
+
+void SoapyPlutoSDR::update_device_timestamp_every(struct iio_device *dev, uint32_t value)
+{
+	// Read current ADC GPIO output value, which controls decimator and ADC timestamp setting
+	uint32_t temp_reg_val;
+	if (iio_device_reg_read(dev, 0x800000BC, &temp_reg_val) < 0) {
+		// Failed to read GPIO register
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to read timestamp_every setting");
+		throw std::runtime_error("failed to read timestamp_every setting");
+	}
+
+	// ADC/DAC data bus in the pluto is 64-bit wide. With I/Q channels enabled for one channel
+	// each sample is 2 * 16-bit. Therefore 2 samples will be carried in each 64-bit value.
+	// Timestamps are applied every x samples on the 64-bit bus. Therefore we divide the
+	// requested timestamp every value by 2.
+	// The 32-bit GPIO register is divided into timestamp_every [31:1] and decimator/interpolator enable [0:0]
+	// therefore we mask off the old bits and or in the new bits, shifting them into place.
+	temp_reg_val &= ~0x1; // Mask off all but lowest bit
+	temp_reg_val |= ((value / 2) << 1);
+
+	// Write new ADC GPIO output value.
+	if (iio_device_reg_write(dev, 0x800000BC, temp_reg_val) < 0) {
+		// Failed to write GPIO register
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to write timestamp_every setting");
+		throw std::runtime_error("failed to write timestamp_every setting");
+	}
+}

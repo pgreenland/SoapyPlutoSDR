@@ -90,7 +90,7 @@ class tx_streamer_iio : public tx_streamer {
 		std::vector<iio_channel* > channel_list;
 		const iio_device  *dev;
 		const plutosdrStreamFormat format;
-		
+
 		iio_buffer  *buf;
 		size_t buf_size;
 		size_t items_in_buf;
@@ -326,7 +326,7 @@ class SoapyPlutoSDR : public SoapySDR::Device{
 
         bool IsValidRxStreamHandle(SoapySDR::Stream* handle) const;
         bool IsValidTxStreamHandle(SoapySDR::Stream* handle) const;
-       
+
 		bool is_sensor_channel(struct iio_channel *chn) const;
 		double double_from_buf(const char *buf) const;
 		double get_sensor_value(struct iio_channel *chn) const;
@@ -344,13 +344,19 @@ class SoapyPlutoSDR : public SoapySDR::Device{
 		std::unique_ptr<rx_streamer> rx_stream;
         std::unique_ptr<tx_streamer> tx_stream;
 
+		uint32_t timestamp_every_rx;
+		uint32_t timestamp_every_tx;
+
+		void handle_usb_direct_args(const SoapySDR::Kwargs & args);
+		void handle_loopback_args(const SoapySDR::Kwargs & args);
+		void handle_timestamp_every_arg(const SoapySDR::Kwargs & args, bool tx);
+
 		#ifdef HAS_LIBUSB1
 		libusb_device_handle* usb_sdr_dev;
 		uint8_t usb_sdr_intfc_num, usb_sdr_ep_in, usb_sdr_ep_out;
 		void open_sdr_usb_gadget(void);
 		#endif
 
-		uint32_t timestamp_every;
-		void update_device_timestamp_every(struct iio_device *dev);
+		void update_device_timestamp_every(struct iio_device *dev, uint32_t value);
 };
 

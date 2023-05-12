@@ -107,6 +107,10 @@ SoapySDR::Stream *SoapyPlutoSDR::setupStream(
 			"setupStream invalid format '" + format + "' -- Only CS8, CS12, CS16 and CF32 are supported by SoapyPlutoSDR module.");
 	}
 
+	// Handle any arguments provided during stream creation
+	handle_usb_direct_args(args);
+	handle_loopback_args(args);
+	handle_timestamp_every_arg(args, direction == SOAPY_SDR_TX);
 
 	if(direction == SOAPY_SDR_RX){
 
@@ -121,7 +125,7 @@ SoapySDR::Stream *SoapyPlutoSDR::setupStream(
 			// Use usb streaming gadget
 			this->rx_stream = std::unique_ptr<rx_streamer>(new rx_streamer_usb_gadget (rx_dev,
 																					   this->usb_sdr_dev, this->usb_sdr_intfc_num, this->usb_sdr_ep_in,
-																					   streamFormat, channels, args, this->timestamp_every));
+																					   streamFormat, channels, args, this->timestamp_every_rx));
 		}
 		else
 		#endif
@@ -146,7 +150,7 @@ SoapySDR::Stream *SoapyPlutoSDR::setupStream(
 			// Use usb streaming gadget
 			this->tx_stream = std::unique_ptr<tx_streamer>(new tx_streamer_usb_gadget (tx_dev,
 																					   this->usb_sdr_dev, this->usb_sdr_intfc_num, this->usb_sdr_ep_out,
-																					   streamFormat, channels, args, this->timestamp_every));
+																					   streamFormat, channels, args, this->timestamp_every_tx));
 		}
 		else
 		#endif
