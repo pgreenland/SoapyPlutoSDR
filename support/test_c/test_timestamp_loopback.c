@@ -68,7 +68,7 @@ int main(void)
     tx_mtu = 6; // IQ samples (12 words)
 
     //sample count
-    size_t sample_count = 1000;
+    size_t sample_count = 30000;
 
     //create buffers for samples (unsigned signed int16's - although we're transmitting and receiving signed numbers)
     //double size for I and Q samples
@@ -99,8 +99,8 @@ int main(void)
     //here goes
     printf("Start test...\n");
 
-    ////ensure buffers in device are empty
-    for (size_t buffers_read = 0; buffers_read < 16; /* in loop */)
+    //ensure buffers in device are empty
+    for (size_t buffers_read = 0; buffers_read < 128; /* in loop */)
     {
         void *buffs[] = {rx_buff[0]}; //array of buffers
         int flags; //flags set by receive operation
