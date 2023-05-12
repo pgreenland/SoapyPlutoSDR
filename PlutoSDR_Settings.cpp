@@ -875,27 +875,27 @@ void SoapyPlutoSDR::handle_timestamp_every_arg(const SoapySDR::Kwargs & args, bo
 			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for %s timestamp_every, expected number", tx ? "TX" : "RX");
 			throw std::runtime_error("invalid value for timestamp_every, expected number");
 		}
-	}
 
-	// Check timestamp every is only asserted with usb_direct for now
-	if (new_timestamp_every > 0) {
-		#ifdef HAS_LIBUSB1
-		if (!this->usb_sdr_dev) {
-		#else
-		{
-		#endif
-			SoapySDR_logf(SOAPY_SDR_ERROR, "timestamp_every only currently supported with usb_direct");
-			throw std::runtime_error("timestamp_every only currently supported with usb_direct");
+		// Check timestamp every is only asserted with usb_direct for now
+		if (new_timestamp_every > 0) {
+			#ifdef HAS_LIBUSB1
+			if (!this->usb_sdr_dev) {
+			#else
+			{
+			#endif
+				SoapySDR_logf(SOAPY_SDR_ERROR, "timestamp_every only currently supported with usb_direct");
+				throw std::runtime_error("timestamp_every only currently supported with usb_direct");
+			}
 		}
-	}
 
-	// Set appropriate timestamp_every
-	if (tx) {
-		timestamp_every_tx = new_timestamp_every;
-		update_device_timestamp_every(tx_dev, timestamp_every_tx);
-	} else {
-		timestamp_every_rx = new_timestamp_every;
-		update_device_timestamp_every(rx_dev, timestamp_every_rx);
+		// Set appropriate timestamp_every
+		if (tx) {
+			timestamp_every_tx = new_timestamp_every;
+			update_device_timestamp_every(tx_dev, timestamp_every_tx);
+		} else {
+			timestamp_every_rx = new_timestamp_every;
+			update_device_timestamp_every(rx_dev, timestamp_every_rx);
+		}
 	}
 }
 
