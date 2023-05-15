@@ -40,6 +40,8 @@ class tx_streamer_usb_gadget : public tx_streamer {
 
 		size_t get_mtu_size();
 
+		void set_samplerate(const size_t _samplerate);
+
 	private:
 		// IIO device
 		const iio_device *dev;

@@ -310,6 +310,12 @@ size_t tx_streamer_usb_gadget::get_mtu_size()
 	return buffer_size_samples - timestamp_size_samples;
 }
 
+void tx_streamer_usb_gadget::set_samplerate(const size_t _samplerate)
+{
+	// Store updated sample rate
+	sample_rate = _samplerate;
+}
+
 void tx_streamer_usb_gadget::set_buffer_size(const size_t _buffer_size)
 {
 	if (buffer_size_samples != _buffer_size) {

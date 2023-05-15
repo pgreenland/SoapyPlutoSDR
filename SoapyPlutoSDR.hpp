@@ -83,6 +83,9 @@ class tx_streamer_iio : public tx_streamer {
 		size_t get_mtu_size() {
 			return 4096;
 		}
+		void set_samplerate(const size_t _samplerate) {
+			// Do nothing
+		}
 	private:
 		int send_buf();
 		bool has_direct_copy();

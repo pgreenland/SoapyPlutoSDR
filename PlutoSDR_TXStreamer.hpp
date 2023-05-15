@@ -22,4 +22,6 @@ class tx_streamer {
 						 const long long timeNs) = 0;
 
 		virtual size_t get_mtu_size() = 0;
+
+		virtual void set_samplerate(const size_t _samplerate) = 0;
 };
