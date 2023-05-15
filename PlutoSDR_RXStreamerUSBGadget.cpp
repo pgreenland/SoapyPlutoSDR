@@ -358,13 +358,20 @@ void rx_streamer_usb_gadget::thread_func(uint32_t curr_enabled_channels, uint32_
 	buffer->resize(curr_buffer_size_bytes);
 
 	// Keep running until told to stop
+	size_t buffers_to_drop = 32; // Ensure anything kicking around in the queues and buffers is dropped
 	while (!thread_stop.load()) {
 		// Read data with 1s timeout
 		int bytes_transferred = 0;
 		int rc = libusb_bulk_transfer(usb_dev, ep_num, buffer->data(), buffer->size(), &bytes_transferred, 1000);
 		if (LIBUSB_SUCCESS == rc && ((size_t)bytes_transferred == buffer->size())) {
-			// Transfer complete with expected size, push buffer into fifo without blocking
-			queue.push(buffer, false, 0);
+			// Transfer complete with expected size
+			if (0 == buffers_to_drop) {
+				// Push buffer into fifo without blocking
+				queue.push(buffer, false, 0);
+			} else {
+				// Still within initial drop range, discard buffer
+				buffers_to_drop--;
+			}
 
 			// Create new buffer
 			buffer = std::make_shared<std::vector<uint8_t>>(std::vector<uint8_t>());
