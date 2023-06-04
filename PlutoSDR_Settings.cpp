@@ -1039,7 +1039,7 @@ void SoapyPlutoSDR::update_device_timestamp_every(struct iio_device *dev, uint32
 	// requested timestamp every value by 2.
 	// The 32-bit GPIO register is divided into timestamp_every [31:1] and decimator/interpolator enable [0:0]
 	// therefore we mask off the old bits and or in the new bits, shifting them into place.
-	temp_reg_val &= ~0x1; // Mask off all but lowest bit
+	temp_reg_val &= 0x1; // Mask off all but lowest bit
 	temp_reg_val |= ((value / 2) << 1);
 
 	// Write new ADC GPIO output value.
