@@ -28,7 +28,7 @@
 
 class rx_streamer_iio : public rx_streamer {
 	public:
-		rx_streamer_iio(const iio_device *dev, const plutosdrStreamFormat format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args);
+		rx_streamer_iio(const iio_device *dev, const plutosdrStreamFormat format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args, uint32_t timestamp_every);
 		~rx_streamer_iio();
 		size_t recv(void * const *buffs,
 				const size_t numElems,
@@ -49,7 +49,6 @@ class rx_streamer_iio : public rx_streamer {
 	private:
 
 		void set_buffer_size(const size_t _buffer_size);
-        void set_mtu_size(const size_t mtu_size);
 
 		bool has_direct_copy();
 
@@ -62,14 +61,18 @@ class rx_streamer_iio : public rx_streamer {
 		iio_buffer  *buf;
 		const plutosdrStreamFormat format;
 		bool direct_copy;
-        size_t mtu_size;
 
+		uint32_t timestamp_every;
+		long long sample_rate;
+		uint32_t timestamp_size_samples;
+		bool fixed_buffer_size;
+		uint64_t curr_buffer_timestamp;
 };
 
 class tx_streamer_iio : public tx_streamer {
 
 	public:
-		tx_streamer_iio(const iio_device *dev, const plutosdrStreamFormat format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args);
+		tx_streamer_iio(const iio_device *dev, const plutosdrStreamFormat format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args, uint32_t timestamp_every);
 		~tx_streamer_iio();
 		int send(const void * const *buffs,const size_t numElems,int &flags,const long long timeNs,const long timeoutUs );
 		int flush(const long timeoutUs);
@@ -82,9 +85,7 @@ class tx_streamer_iio : public tx_streamer {
 				 const long long timeNs) {
 			return flush(0);
 		}
-		size_t get_mtu_size() {
-			return 4096;
-		}
+		size_t get_mtu_size();
 		void set_samplerate(const size_t _samplerate) {
 			// Do nothing
 		}
@@ -101,6 +102,12 @@ class tx_streamer_iio : public tx_streamer {
 		size_t items_in_buf;
 		bool direct_copy;
 
+		void set_buffer_size(const size_t _buffer_size);
+
+		uint32_t timestamp_every;
+		long long sample_rate;
+		uint32_t timestamp_size_samples;
+		uint64_t curr_buffer_timestamp;
 };
 
 // A local spin_mutex usable with std::lock_guard

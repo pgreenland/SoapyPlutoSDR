@@ -928,18 +928,6 @@ void SoapyPlutoSDR::handle_timestamp_every_arg(const SoapySDR::Kwargs & args, bo
 			throw std::runtime_error("invalid value for timestamp_every, expected number");
 		}
 
-		// Check timestamp every is only asserted with usb_direct for now
-		if (new_timestamp_every > 0) {
-			#ifdef HAS_LIBUSB1
-			if (!this->usb_sdr_dev && -1 == this->ip_sdr_dev_control) {
-			#else
-			if (-1 == this->ip_sdr_dev_control) {
-			#endif
-				SoapySDR_logf(SOAPY_SDR_ERROR, "timestamp_every only currently supported with direct mode");
-				throw std::runtime_error("timestamp_every only currently supported with direct mode");
-			}
-		}
-
 		// Set appropriate timestamp_every
 		if (tx) {
 			timestamp_every_tx = new_timestamp_every;

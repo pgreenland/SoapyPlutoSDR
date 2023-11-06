@@ -7,8 +7,7 @@
 #include <algorithm>
 #include <chrono>
 
-//TODO: Need to be a power of 2 for maximum efficiency ?
-# define DEFAULT_RX_BUFFER_SIZE (1 << 16)
+#include <SoapySDR/Time.hpp>
 
 
 std::vector<std::string> SoapyPlutoSDR::getStreamFormats(const int direction, const size_t channel) const
@@ -139,7 +138,7 @@ SoapySDR::Stream *SoapyPlutoSDR::setupStream(
 		#endif
 		{
 			// Use IIO
-			this->rx_stream = std::unique_ptr<rx_streamer>(new rx_streamer_iio (rx_dev, streamFormat, channels, args));
+			this->rx_stream = std::unique_ptr<rx_streamer>(new rx_streamer_iio (rx_dev, streamFormat, channels, args, timestamp_every_rx));
 		}
 
         return reinterpret_cast<SoapySDR::Stream*>(this->rx_stream.get());
@@ -172,7 +171,7 @@ SoapySDR::Stream *SoapyPlutoSDR::setupStream(
 		#endif
 		{
 			// Use IIO
-			this->tx_stream = std::unique_ptr<tx_streamer>(new tx_streamer_iio (tx_dev, streamFormat, channels, args));
+			this->tx_stream = std::unique_ptr<tx_streamer>(new tx_streamer_iio (tx_dev, streamFormat, channels, args, timestamp_every_tx));
 		}
 
         return reinterpret_cast<SoapySDR::Stream*>(this->tx_stream.get());
@@ -320,6 +319,11 @@ int SoapyPlutoSDR::readStreamStatus(
 }
 
 void rx_streamer_iio::set_buffer_size_by_samplerate(const size_t samplerate) {
+	// Store new sample rate
+	sample_rate = samplerate;
+
+	// Skip update if user has supplied a fixed buffer size
+	if (fixed_buffer_size) return;
 
     //Adapt buffer size (= MTU) as a tradeoff to minimize readStream overhead but at
     //the same time allow realtime applications. Keep it a power of 2 which seems to be better.
@@ -335,24 +339,10 @@ void rx_streamer_iio::set_buffer_size_by_samplerate(const size_t samplerate) {
     this->set_buffer_size(1 << power_of_2_nb_samples);
 
 	SoapySDR_logf(SOAPY_SDR_INFO, "Auto setting Buffer Size: %lu", (unsigned long)buffer_size);
-
-    //Recompute MTU from buffer size change.
-    //We always set MTU size = Buffer Size.
-    //On buffer size adjustment to sample rate,
-    //MTU can be changed accordingly safely here.
-    set_mtu_size(this->buffer_size);
 }
 
-void rx_streamer_iio::set_mtu_size(const size_t mtu_size) {
-
-    this->mtu_size = mtu_size;
-
-    SoapySDR_logf(SOAPY_SDR_INFO, "Set MTU Size: %lu", (unsigned long)mtu_size);
-}
-
-
-rx_streamer_iio::rx_streamer_iio(const iio_device *_dev, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args):
-	dev(_dev), buffer_size(DEFAULT_RX_BUFFER_SIZE), buf(nullptr), format(_format), mtu_size(DEFAULT_RX_BUFFER_SIZE)
+rx_streamer_iio::rx_streamer_iio(const iio_device *_dev, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args, uint32_t _timestamp_every):
+	dev(_dev), buf(nullptr), format(_format), timestamp_every(_timestamp_every)
 
 {
 	if (dev == nullptr) {
@@ -372,24 +362,59 @@ rx_streamer_iio::rx_streamer_iio(const iio_device *_dev, const plutosdrStreamFor
 		channel_list.push_back(chn);
 	}
 
-	if ( args.count( "bufflen" ) != 0 ){
+	// Retrieve sample rate
+	iio_channel_attr_read_longlong(iio_device_find_channel(dev, "voltage0", false),"sampling_frequency", &sample_rate);
 
-		try
-		{
-			size_t bufferLength = std::stoi(args.at("bufflen"));
-			if (bufferLength > 0)
-				this->set_buffer_size(bufferLength);
+	// Calculate timestamp size
+	timestamp_size_samples = (channel_list.size() == 2 ? 2 : 1);
+
+	// Calculate buffer size based on timestamping
+	uint32_t buffer_len_timestamp = timestamp_every;
+	if (buffer_len_timestamp > 0) {
+		// Add space for timestamp, based on number of enabled channels
+		// With one channel enabled, a timestamp takes up the space of two samples
+		// With two channels enabled, a timestamp takes up the space of one sample
+		buffer_len_timestamp += timestamp_size_samples;
+	}
+
+	// Assume buffer size will be supplied by user
+	fixed_buffer_size = true;
+
+	// Calculate buffer length
+	if (args.count("bufflen") != 0) {
+		// Buffer length provided
+		size_t buffer_length;
+
+		// Convert argument from string to integer
+		try {
+			buffer_length = std::stoi(args.at("bufflen"));
+
+		} catch (const std::invalid_argument &) {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "bad bufflen provided");
+			throw std::runtime_error("bad bufflen provided\n");
 		}
-		catch (const std::invalid_argument &){}
 
-	}else{
+		// If buffer length provided, while timestamping enabled, check that two values are equal
+		// for now every buffer is expected to have a timestamp
+		if (    (buffer_length > 0)
+			&& (buffer_len_timestamp > 0)
+			&& (buffer_length != buffer_len_timestamp)
+		   ) {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "bufflen provided incompatible with timestamp_every");
+			throw std::runtime_error("bufflen provided incompatible with timestamp_every\n");
+		}
 
-		long long samplerate;
+		// Set length
+		set_buffer_size(buffer_length);
 
-		iio_channel_attr_read_longlong(iio_device_find_channel(dev, "voltage0", false),"sampling_frequency",&samplerate);
+	} else if (buffer_len_timestamp > 0) {
+		// Buffer length set based on timestamping
+		set_buffer_size(buffer_len_timestamp);
 
-		this->set_buffer_size_by_samplerate(samplerate);
-
+	} else {
+		// Buffer length not provided and timestamping disabled, calculate based on sample rate
+		fixed_buffer_size = false;
+		set_buffer_size_by_samplerate(sample_rate);
 	}
 }
 
@@ -435,6 +460,16 @@ size_t rx_streamer_iio::recv(void * const *buffs,
         // SoapySDR_logf(SOAPY_SDR_INFO, "iio_buffer_refill took %d ms to refill %d items", (int)(after - before), items_in_buffer);
 
 		byte_offset = 0;
+
+		// Check if timestamping enabled
+		if (timestamp_every > 0) {
+			// Extract timestamp from start of buffer
+			curr_buffer_timestamp = *((uint64_t*)iio_buffer_start(buf));
+
+			// Decrement samples and advance offset
+			items_in_buffer -= timestamp_size_samples;
+			byte_offset += sizeof(uint64_t);
+		}
 	}
 
 	size_t items = std::min(items_in_buffer,numElems);
@@ -534,6 +569,18 @@ size_t rx_streamer_iio::recv(void * const *buffs,
 	items_in_buffer -= items;
 	byte_offset += items * iio_buffer_step(buf);
 
+	// Set flags
+	flags = 0;
+	if (timestamp_every > 0)
+	{
+		// Timestamp present
+		flags |= SOAPY_SDR_HAS_TIME;
+		timeNs = SoapySDR::ticksToTimeNs(curr_buffer_timestamp, sample_rate);
+
+		// Increment timestamp ticks
+		curr_buffer_timestamp += items;
+	}
+
 	return(items);
 
 }
@@ -549,8 +596,8 @@ int rx_streamer_iio::start(const int flags,
 	buf = iio_device_create_buffer(dev, buffer_size, false);
 
 	if (!buf) {
-		SoapySDR_logf(SOAPY_SDR_ERROR, "Unable to create buffer!");
-		throw std::runtime_error("Unable to create buffer!\n");
+		SoapySDR_logf(SOAPY_SDR_ERROR, "Unable to create rx buffer!");
+		throw std::runtime_error("Unable to create rx buffer!\n");
 	}
 
 	direct_copy = has_direct_copy();
@@ -598,8 +645,8 @@ void rx_streamer_iio::set_buffer_size(const size_t _buffer_size){
 
 		buf = iio_device_create_buffer(dev, _buffer_size, false);
 		if (!buf) {
-			SoapySDR_logf(SOAPY_SDR_ERROR, "Unable to create buffer!");
-			throw std::runtime_error("Unable to create buffer!\n");
+			SoapySDR_logf(SOAPY_SDR_ERROR, "Unable to create tx buffer!");
+			throw std::runtime_error("Unable to create tx buffer!\n");
 		}
 
 	}
@@ -608,7 +655,8 @@ void rx_streamer_iio::set_buffer_size(const size_t _buffer_size){
 }
 
 size_t rx_streamer_iio::get_mtu_size() {
-    return this->mtu_size;
+	// Return size of buffer data area
+	return buffer_size - timestamp_size_samples;
 }
 
 // return wether can we optimize for single RX, 2 channel (I/Q), same endianess direct copy
@@ -633,8 +681,8 @@ bool rx_streamer_iio::has_direct_copy()
 }
 
 
-tx_streamer_iio::tx_streamer_iio(const iio_device *_dev, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args) :
-	dev(_dev), format(_format), buf(nullptr)
+tx_streamer_iio::tx_streamer_iio(const iio_device *_dev, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args, uint32_t _timestamp_every) :
+	dev(_dev), format(_format), buf(nullptr), timestamp_every(_timestamp_every)
 {
 
 	if (dev == nullptr) {
@@ -655,12 +703,55 @@ tx_streamer_iio::tx_streamer_iio(const iio_device *_dev, const plutosdrStreamFor
 		channel_list.push_back(chn);
 	}
 
-	buf_size = 4096;
-	items_in_buf = 0;
-	buf = iio_device_create_buffer(dev, buf_size, false);
-	if (!buf) {
-		SoapySDR_logf(SOAPY_SDR_ERROR, "Unable to create buffer!");
-		throw std::runtime_error("Unable to create buffer!");
+	// Retrieve sample rate
+	iio_channel_attr_read_longlong(iio_device_find_channel(dev, "voltage0", true),"sampling_frequency", &sample_rate);
+
+	// Calculate timestamp size
+	timestamp_size_samples = (channel_list.size() == 2 ? 2 : 1);
+
+	// Calculate buffer size based on timestamping
+	uint32_t buffer_len_timestamp = timestamp_every;
+	if (buffer_len_timestamp > 0) {
+		// Add space for timestamp, based on number of enabled channels
+		// With one channel enabled, a timestamp takes up the space of two samples
+		// With two channels enabled, a timestamp takes up the space of one sample
+		buffer_len_timestamp += timestamp_size_samples;
+	}
+
+	// Calculate buffer length
+	if (args.count("bufflen") != 0) {
+		// Buffer length provided
+		size_t buffer_length;
+
+		// Convert argument from string to integer
+		try {
+			buffer_length = std::stoi(args.at("bufflen"));
+
+		} catch (const std::invalid_argument &) {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "bad bufflen provided");
+			throw std::runtime_error("bad bufflen provided\n");
+		}
+
+		// If buffer length provided, while timestamping enabled, check that two values are equal
+		// for now every buffer is expected to have a timestamp
+		if (    (buffer_length > 0)
+			&& (buffer_len_timestamp > 0)
+			&& (buffer_length != buffer_len_timestamp)
+		   ) {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "bufflen provided incompatible with timestamp_every");
+			throw std::runtime_error("bufflen provided incompatible with timestamp_every\n");
+		}
+
+		// Set length
+		set_buffer_size(buffer_length);
+
+	} else if (buffer_len_timestamp > 0) {
+		// Buffer length set based on timestamping
+		set_buffer_size(buffer_len_timestamp);
+
+	} else {
+		// Buffer length not provided and timestamping disabled, assume same default as iio tx streamer
+		set_buffer_size(4096);
 	}
 
 	direct_copy = has_direct_copy();
@@ -678,6 +769,35 @@ tx_streamer_iio::~tx_streamer_iio(){
 
 }
 
+void tx_streamer_iio::set_buffer_size(const size_t _buffer_size) {
+	if (!buf || this->buf_size != _buffer_size) {
+        //cancel first
+        if (buf) {
+            iio_buffer_cancel(buf);
+        }
+        //then destroy
+        if (buf) {
+            iio_buffer_destroy(buf);
+        }
+
+		items_in_buf = 0;
+
+		buf = iio_device_create_buffer(dev, _buffer_size, false);
+		if (!buf) {
+			SoapySDR_logf(SOAPY_SDR_ERROR, "Unable to create tx buffer!");
+			throw std::runtime_error("Unable to create tx buffer!\n");
+		}
+
+	}
+
+	this->buf_size=_buffer_size;
+}
+
+size_t tx_streamer_iio::get_mtu_size() {
+	// Return size of buffer data area
+	return buf_size - timestamp_size_samples;
+}
+
 int tx_streamer_iio::send(	const void * const *buffs,
 		const size_t numElems,
 		int &flags,
@@ -689,11 +809,69 @@ int tx_streamer_iio::send(	const void * const *buffs,
         return 0;
     }
 
+	// Check if timestamping enabled
+	if (timestamp_every > 0) {
+		// Timestamping enabled, check time provided
+		if (0 == (flags & SOAPY_SDR_HAS_TIME)) {
+			// No time provided
+			SoapySDR_logf(SOAPY_SDR_ERROR, "Timestamping enabled but no timestamp provided");
+			throw std::runtime_error("Timestamping enabled but no timestamp provided");
+		}
+
+		// Check if a buffer has samples
+		if (items_in_buf > 0) {
+			// Buffer has data, convert first sample timestamp
+			uint64_t temp_timestamp = SoapySDR::timeNsToTicks(timeNs, sample_rate);
+
+			// Calculate timestamp difference and sample count difference
+			uint64_t timestamp_diff = (temp_timestamp - curr_buffer_timestamp);
+			size_t curr_buffer_free_samples = buf_size - items_in_buf;
+
+			// Calculate how many samples to add to buffer
+			size_t samples_to_fill = std::min(timestamp_diff, curr_buffer_free_samples);
+
+			// Zero new samples
+			ptrdiff_t buf_step = iio_buffer_step(buf);
+			uint8_t *buf_ptr = (uint8_t *)iio_buffer_start(buf) + items_in_buf * buf_step;
+			uint8_t *buf_end = (uint8_t *)iio_buffer_start(buf) + (items_in_buf + samples_to_fill) * buf_step;
+			memset(buf_ptr, 0, buf_end - buf_ptr);
+
+			// Increment sample count
+			items_in_buf += samples_to_fill;
+
+			// Flush buffer if full
+			if (items_in_buf == buf_size) {
+				// Flush and return error code
+				int ret = send_buf();
+
+				if (ret < 0) {
+					return SOAPY_SDR_ERROR;
+				}
+
+				if ((size_t)ret != buf_size) {
+					return SOAPY_SDR_ERROR;
+				}
+			}
+		}
+
+		// Check if buffer is empty
+		if (0 == items_in_buf) {
+			// Capture timestamp
+			curr_buffer_timestamp = SoapySDR::timeNsToTicks(timeNs, sample_rate);
+
+			// Place timestamp at start of buffer
+			*((uint64_t*)iio_buffer_start(buf)) = curr_buffer_timestamp;
+
+			// Increment sample count
+			items_in_buf += timestamp_size_samples;
+		}
+	}
+
 	size_t items = std::min(buf_size - items_in_buf, numElems);
 
 	int16_t src = 0;
 	int16_t const *src_ptr = &src;
-	ptrdiff_t buf_step = iio_buffer_step(buf); //in bytes
+	ptrdiff_t buf_step = iio_buffer_step(buf);
 
 	if (direct_copy && format == PLUTO_SDR_CS16) {
 		// optimize for single TX, 2 channel (I/Q), same endianess direct copy
@@ -777,6 +955,9 @@ int tx_streamer_iio::send(	const void * const *buffs,
 	}
 
 	items_in_buf += items;
+
+	// Increment timestamp ticks
+	curr_buffer_timestamp += items;
 
 	if (items_in_buf == buf_size || (flags & SOAPY_SDR_END_BURST && numElems == items)) {
 		int ret = send_buf();
