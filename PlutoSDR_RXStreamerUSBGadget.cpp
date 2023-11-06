@@ -199,15 +199,14 @@ size_t rx_streamer_usb_gadget::recv(void * const *buffs,
 			unsigned int index = i / 2;
 
 			uint8_t *src = curr_buffer->data() + curr_buffer_offset + (sizeof(uint16_t) * i);
-			int16_t const *src_ptr = (int16_t *)src;
 
 			if (format == PLUTO_SDR_CS16) {
 
 				int16_t *dst_cs16 = (int16_t *)buffs[index];
 
 				for (size_t j = 0; j < items; ++j) {
-					iio_channel_convert(chn, conv_ptr, src_ptr);
-					src_ptr += sample_size_bytes;
+					iio_channel_convert(chn, conv_ptr, src);
+					src += sample_size_bytes;
 					dst_cs16[j * 2 + i] = conv;
 				}
 			}
@@ -216,8 +215,8 @@ size_t rx_streamer_usb_gadget::recv(void * const *buffs,
 				float *dst_cf32 = (float *)buffs[index];
 
 				for (size_t j = 0; j < items; ++j) {
-					iio_channel_convert(chn, conv_ptr, src_ptr);
-					src_ptr += sample_size_bytes;
+					iio_channel_convert(chn, conv_ptr, src);
+					src += sample_size_bytes;
 					dst_cf32[j * 2 + i] = float(conv) / 2048.0f;
 				}
 			}
@@ -226,8 +225,8 @@ size_t rx_streamer_usb_gadget::recv(void * const *buffs,
 				int8_t *dst_cs8 = (int8_t *)buffs[index];
 
 				for (size_t j = 0; j < items; ++j) {
-					iio_channel_convert(chn, conv_ptr, src_ptr);
-					src_ptr += sample_size_bytes;
+					iio_channel_convert(chn, conv_ptr, src);
+					src += sample_size_bytes;
 					dst_cs8[j * 2 + i] = int8_t(conv >> 4);
 				}
 			}
