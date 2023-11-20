@@ -96,6 +96,9 @@ rx_streamer_ip_gadget::rx_streamer_ip_gadget(const iio_device *_dev, int _sock_c
 
 	// Report status
 	SoapySDR_logf(SOAPY_SDR_INFO, "Has direct RX copy: %d", (int)direct_copy);
+
+	// Reset current timestamp
+	curr_buffer_timestamp = 0;
 }
 
 rx_streamer_ip_gadget::~rx_streamer_ip_gadget()
