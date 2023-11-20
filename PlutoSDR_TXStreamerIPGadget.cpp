@@ -156,13 +156,10 @@ int tx_streamer_ip_gadget::send(const void * const *buffs,
 		if (timestamp_every > 0) {
 			// Capture timestamp
 			curr_buffer_timestamp = SoapySDR::timeNsToTicks(timeNs, sample_rate);
-
-			// Store timestamp in header
-			curr_buffer->hdr.seqno = curr_buffer_timestamp;
-		} else {
-			// Store current sequence number in header
-			curr_buffer->hdr.seqno = curr_buffer_timestamp;
 		}
+
+		// Store current sequence number in header
+		curr_buffer->hdr.seqno = curr_buffer_timestamp;
 	}
 
 	// Work out how many items to copy
