@@ -19,6 +19,8 @@
 #include "PlutoSDR_StreamFormat.hpp"
 #include "PlutoSDR_RXStreamer.hpp"
 #include "PlutoSDR_TXStreamer.hpp"
+#include "PlutoSDR_RXStreamerIPGadget.hpp"
+#include "PlutoSDR_TXStreamerIPGadget.hpp"
 #ifdef HAS_LIBUSB1
 #include "PlutoSDR_RXStreamerUSBGadget.hpp"
 #include "PlutoSDR_TXStreamerUSBGadget.hpp"
@@ -351,15 +353,22 @@ class SoapyPlutoSDR : public SoapySDR::Device{
 		uint32_t timestamp_every_rx;
 		uint32_t timestamp_every_tx;
 
-		void handle_usb_direct_args(const SoapySDR::Kwargs & args);
+		void handle_direct_args(const SoapySDR::Kwargs & args);
 		void handle_loopback_args(const SoapySDR::Kwargs & args);
 		void handle_timestamp_every_arg(const SoapySDR::Kwargs & args, bool tx);
 
+		/* "Direct" IO usb gadget */
 		#ifdef HAS_LIBUSB1
 		libusb_device_handle* usb_sdr_dev;
 		uint8_t usb_sdr_intfc_num, usb_sdr_ep_in, usb_sdr_ep_out;
 		void open_sdr_usb_gadget(void);
 		#endif
+
+		/* "Direct" IP ethernet gadget */
+		int ip_sdr_dev_control;
+		int ip_sdr_dev_data;
+		size_t udp_packet_size;
+		void open_sdr_ip_gadget(void);
 
 		void update_device_timestamp_every(struct iio_device *dev, uint32_t value);
 };

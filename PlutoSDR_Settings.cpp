@@ -11,10 +11,18 @@
 
 #include <string.h>
 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+
 static iio_context *ctx = nullptr;
 #ifdef HAS_LIBUSB1
 static libusb_context *usb_ctx = nullptr;
 #endif
+
+#define DIRECT_IP_PORT_CONTROL (30432) // IIOD + 1
+#define DIRECT_IP_PORT_DATA (30433) // IIOD + 2
 
 SoapyPlutoSDR::SoapyPlutoSDR( const SoapySDR::Kwargs &args ):
 	dev(nullptr), rx_dev(nullptr),tx_dev(nullptr), decimation(false), interpolation(false), rx_stream(nullptr)
@@ -23,17 +31,19 @@ SoapyPlutoSDR::SoapyPlutoSDR( const SoapySDR::Kwargs &args ):
 	gainMode = false;
 
 	if (args.count("label") != 0)
-		SoapySDR_logf( SOAPY_SDR_INFO, "Opening %s...", args.at("label").c_str());
+		SoapySDR_logf( SOAPY_SDR_INFO, "Opening label %s...", args.at("label").c_str());
 
 	if(ctx == nullptr)
 	{
 	  if(args.count("uri") != 0) {
-
+		  SoapySDR_logf( SOAPY_SDR_INFO, "Opening URI %s...", args.at("uri").c_str());
 		  ctx = iio_create_context_from_uri(args.at("uri").c_str());
 
 	  }else if(args.count("hostname")!=0){
+		  SoapySDR_logf( SOAPY_SDR_INFO, "Opening hostname %s...", args.at("hostname").c_str());
 		  ctx = iio_create_network_context(args.at("hostname").c_str());
 	  }else{
+		  SoapySDR_logf( SOAPY_SDR_INFO, "Opening default context...");
 		  ctx = iio_create_default_context();
 	  }
 	}
@@ -56,10 +66,12 @@ SoapyPlutoSDR::SoapyPlutoSDR( const SoapySDR::Kwargs &args ):
 	this->setGainMode(SOAPY_SDR_RX, 0, false);
 	this->setAntenna(SOAPY_SDR_TX, 0, "A");
 
-	#ifdef HAS_LIBUSB1
 	// Assume not using direct mode
+	#ifdef HAS_LIBUSB1
 	usb_sdr_dev = nullptr;
 	#endif
+	ip_sdr_dev_control = -1;
+	ip_sdr_dev_data = -1;
 
 	// Assume loopback unchanged
 	loopback = -1;
@@ -69,7 +81,7 @@ SoapyPlutoSDR::SoapyPlutoSDR( const SoapySDR::Kwargs &args ):
 	timestamp_every_rx = 0;
 
 	// Handle any arguments provided during device creation
-	handle_usb_direct_args(args);
+	handle_direct_args(args);
 	handle_loopback_args(args);
 	handle_timestamp_every_arg(args, false);
 	handle_timestamp_every_arg(args, true);
@@ -89,20 +101,34 @@ SoapyPlutoSDR::~SoapyPlutoSDR(void){
 		iio_channel_attr_write_longlong(iio_device_find_channel(tx_dev, "voltage0", true),"sampling_frequency", samplerate);
 	}
 
-	if(ctx)
-	{
+	if(ctx){
 		iio_context_destroy(ctx);
 		ctx = nullptr;
 	}
 
-	if(this->usb_sdr_dev)
-	{
+	if(this->usb_sdr_dev){
 		libusb_close(this->usb_sdr_dev);
 		this->usb_sdr_dev = nullptr;
 	}
 
-	if(usb_ctx)
-	{
+	if(this->rx_stream){
+		this->rx_stream.reset();
+	}
+
+	if(this->tx_stream){
+		this->tx_stream.reset();
+	}
+
+	if(this->ip_sdr_dev_control){
+		close(this->ip_sdr_dev_control);
+		this->ip_sdr_dev_control = -1;
+	}
+	if(this->ip_sdr_dev_data){
+		close(this->ip_sdr_dev_data);
+		this->ip_sdr_dev_data = -1;
+	}
+
+	if(usb_ctx){
 		libusb_exit(usb_ctx);
 		usb_ctx = nullptr;
 	}
@@ -782,44 +808,64 @@ void SoapyPlutoSDR::setHardwareTime(const long long timeNs, const std::string &w
  * Helpers
  ******************************************************************/
 
-void SoapyPlutoSDR::handle_usb_direct_args(const SoapySDR::Kwargs & args)
+void SoapyPlutoSDR::handle_direct_args(const SoapySDR::Kwargs & args)
 {
-	if (args.count("usb_direct") != 0) {
-		#ifdef HAS_LIBUSB1
-		if (args.at("usb_direct") == "1") {
-			// check if usb direct buffer access is available, aka we're connected via usb
-			if (0 != strcmp(iio_context_get_name(ctx), "usb")) {
-				SoapySDR_logf(SOAPY_SDR_ERROR, "usb_direct is only available when connected via USB");
-				throw std::runtime_error("usb_direct is only available when connected via USB");
-			}
-
-			// Init libusb
-			if (usb_ctx == nullptr) {
-				int rc = libusb_init(&usb_ctx);
-				if (rc < 0) {
-					SoapySDR_logf(SOAPY_SDR_ERROR, "libusb init error (%d)", rc);
-					throw std::runtime_error("libusb init error");
+	if (args.count("direct") != 0) {
+		if (args.at("direct") == "1") {
+			if (0 == strcmp(iio_context_get_name(ctx), "usb")) {
+				// Connected via usb, check if usb support is available to support direct mode
+#ifdef HAS_LIBUSB1
+				// Init libusb
+				if (usb_ctx == nullptr) {
+					int rc = libusb_init(&usb_ctx);
+					if (rc < 0) {
+						SoapySDR_logf(SOAPY_SDR_ERROR, "libusb init error (%d)", rc);
+						throw std::runtime_error("libusb init error");
+					}
 				}
+
+				if (!this->usb_sdr_dev) {
+					// Open usb device
+					this->open_sdr_usb_gadget();
+
+					// Notify usb direct mode in use
+					SoapySDR_logf(SOAPY_SDR_INFO, "USB direct mode enabled!");
+				}
+#else
+				SoapySDR_logf(SOAPY_SDR_ERROR, "usb direct mode is only available when built with LIBUSB");
+				throw std::runtime_error("usb direct mode is only available when built with LIBUSB");
+#endif
 			}
+			else if (0 == strcmp(iio_context_get_name(ctx), "network")) {
+				// Connected via network (hopefully physical ethernet)
+				if ((-1 == this->ip_sdr_dev_control) || (-1 == this->ip_sdr_dev_data)) {
+					// Open ip device
+					this->open_sdr_ip_gadget();
 
-			if (!this->usb_sdr_dev) {
-				// Open usb device
-				this->open_sdr_usb_gadget();
+					// Notify ip direct mode in use
+					SoapySDR_logf(SOAPY_SDR_INFO, "IP direct mode enabled!");
+				}
 
-				// Notify usb direct mode in use
-				SoapySDR_logf(SOAPY_SDR_INFO, "USB direct mode enabled!");
+				// Grab UDP packet sizes to use if available
+				int udp_packet_size = 1472;
+				if (args.count("udp_packet_size") != 0) {
+					// Retrieve size
+					try {
+						udp_packet_size = std::stoi(args.at("udp_packet_size"));
+					} catch (...) {
+						SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for udp_packet_size, expected number");
+						throw std::runtime_error("invalid value for udp_packet_size, expected number");
+					}
+				}
+				this->udp_packet_size = udp_packet_size;
 			}
 		}
-		else if (args.at("usb_direct") == "0") {
+		else if (args.at("direct") == "0") {
 			// default value
 		} else {
-			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for usb_direct, expected 0/1");
-			throw std::runtime_error("invalid value for usb_direct, expected 0/1");
+			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for direct, expected 0/1");
+			throw std::runtime_error("invalid value for direct, expected 0/1");
 		}
-		#else
-		SoapySDR_logf(SOAPY_SDR_ERROR, "usb_direct is only available when build with LIBUSB");
-		throw std::runtime_error("usb_direct is only available when build with LIBUSB");
-		#endif
 	}
 }
 
@@ -881,12 +927,12 @@ void SoapyPlutoSDR::handle_timestamp_every_arg(const SoapySDR::Kwargs & args, bo
 		// Check timestamp every is only asserted with usb_direct for now
 		if (new_timestamp_every > 0) {
 			#ifdef HAS_LIBUSB1
-			if (!this->usb_sdr_dev) {
+			if (!this->usb_sdr_dev && -1 == this->ip_sdr_dev_control) {
 			#else
-			{
+			if (-1 == this->ip_sdr_dev_control) {
 			#endif
-				SoapySDR_logf(SOAPY_SDR_ERROR, "timestamp_every only currently supported with usb_direct");
-				throw std::runtime_error("timestamp_every only currently supported with usb_direct");
+				SoapySDR_logf(SOAPY_SDR_ERROR, "timestamp_every only currently supported with direct mode");
+				throw std::runtime_error("timestamp_every only currently supported with direct mode");
 			}
 		}
 
@@ -1022,6 +1068,64 @@ void SoapyPlutoSDR::open_sdr_usb_gadget(void)
 	}
 }
 #endif
+
+void SoapyPlutoSDR::open_sdr_ip_gadget(void)
+{
+	struct sockaddr_in addr;
+
+	// Retrieve ip address from context
+	const char *ip = iio_context_get_attr_value(ctx, "ip,ip-addr");
+	if (!ip) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to retrieve IP from iio");
+		throw std::runtime_error("failed to retrieve IP from iio");
+	}
+
+	// Open sockets
+	this->ip_sdr_dev_control = socket(AF_INET, SOCK_DGRAM, 0);
+	if (-1 == this->ip_sdr_dev_control) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to open control socket");
+		throw std::runtime_error("failed to open control socket");
+	}
+	this->ip_sdr_dev_data = socket(AF_INET, SOCK_DGRAM, 0);
+	if (-1 == this->ip_sdr_dev_data) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to open data socket");
+		throw std::runtime_error("failed to open data socket");
+	}
+
+	// Bind data socket, such that we can tell the server where to direct rx data to
+	memset(&addr, 0x00, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_port = 0;  // Let the system choose an available port
+	if (bind(this->ip_sdr_dev_data, (struct sockaddr*)&addr, sizeof(addr))) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to bind data socket");
+		throw std::runtime_error("failed to bind data socket");
+	}
+
+	// "Connect" to direct server (saves needing to provide the address each time)
+	memset(&addr, 0x00, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = inet_addr(ip);
+	addr.sin_port = htons(DIRECT_IP_PORT_CONTROL);
+	if (connect(this->ip_sdr_dev_control, (struct sockaddr*)&addr, sizeof(addr))) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to connect control socket");
+		throw std::runtime_error("failed to connect control socket");
+	}
+	addr.sin_port = htons(DIRECT_IP_PORT_DATA);
+	if (connect(this->ip_sdr_dev_data, (struct sockaddr*)&addr, sizeof(addr))) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to connect data socket");
+		throw std::runtime_error("failed to connect data socket");
+	}
+
+	// Set receive timeout on data socket
+	struct timeval timeout;
+	timeout.tv_sec = 1;
+	timeout.tv_usec = 0;
+	if (setsockopt(this->ip_sdr_dev_data, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "failed to set data socket receive timeout");
+		throw std::runtime_error("failed to set data socket receive timeout");
+	}
+}
 
 void SoapyPlutoSDR::update_device_timestamp_every(struct iio_device *dev, uint32_t value)
 {

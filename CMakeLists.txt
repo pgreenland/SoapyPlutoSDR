@@ -84,6 +84,8 @@ SOAPY_SDR_MODULE_UTIL(
     PlutoSDR_Registration.cpp
     PlutoSDR_Settings.cpp
     PlutoSDR_Streaming.cpp
+    PlutoSDR_RXStreamerIPGadget.cpp
+    PlutoSDR_TXStreamerIPGadget.cpp
     LIBRARIES ${LibIIO_LIBRARIES} ${LibAD9361_LIBRARIES} ${LibUSB_LIBRARIES}
 )
 

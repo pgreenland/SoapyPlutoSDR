@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-/* Constants */
+/* Definitions */
 #define SDR_USB_GADGET_COMMAND_START (0x10)
 #define SDR_USB_GADGET_COMMAND_STOP (0x11)
 #define SDR_USB_GADGET_COMMAND_TARGET_RX (0x0)
@@ -27,5 +27,5 @@ typedef struct
 	*/
 	uint32_t buffer_size;
 
-} cmdStartRequest_t;
+} cmd_usb_start_request_t;
 #pragma pack(pop)

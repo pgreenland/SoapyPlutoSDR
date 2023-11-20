@@ -4,104 +4,143 @@ Before receiving and transmitting several buffers worth of data.
 For each reception a transmission is scheduled 4ms in the future, with the transmission timestamp embedded in the datastream.
 Calculated transmission timestamp and received buffered are captured for analysis after the stream completes.
 Received buffers and transmitted timestamps are compared, ensuring timestamps are present in the correct buffers.
+
+Note: For pluto may need to override its reference clock to ensure the timings below are calculated correctly:
+Login via SSH / serial.
+Run: fw_setenv ad936x_ext_refclk_override "<40000000>"
+Reboot.
+
+To reset:
+Login via SSH / serial.
+Run: fw_setenv ad936x_ext_refclk_override
+Reboot.
+
+To run script having installed in an alternative location:
+export SRSRAN_INSTALL=${HOME}/srsRAN
+LD_LIBRARY_PATH=${SRSRAN_INSTALL}/lib PYTHONPATH=${SRSRAN_INSTALL}/lib/python3.8/site-packages python3 test_timestamp_loopback.py
 """
 
 import SoapySDR
-from SoapySDR import * #SOAPY_SDR_ constants
-import numpy #use numpy for buffers
+from SoapySDR import * # SOAPY_SDR_ constants
+import numpy # Use numpy for buffers
 import enum
 
 def main():
     """Perform timestamp test"""
 
-    #enumerate devices
-    results = SoapySDR.Device.enumerate()
-    for result in results: print(result)
+    # Prepare device instance arguments
+    if 0:
+        args = dict(driver="plutosdr", uri="usb:", direct="1", timestamp_every="1920", loopback="1")
+    else:
+        args = dict(driver="plutosdr", uri="ip:pluto", direct="1", udp_packet_size="1472", timestamp_every="1920", loopback="1")
 
-    #create device instance
-    args = dict(driver="plutosdr", uri="usb:", usb_direct="1", timestamp_every="1920", loopback="1")
+    # Enumerate devices using arguments as a search string
+    results = SoapySDR.Device.enumerate(args)
+    for result in results:
+        print(f"Found device: {result}")
+
+    # Create device
     sdr = SoapySDR.Device(args)
 
-    #apply settings
+    # Apply settings
     sdr.setSampleRate(SOAPY_SDR_RX, 0, 1.92e6)
     sdr.setFrequency(SOAPY_SDR_RX, 0, 800.0e6)
     sdr.setSampleRate(SOAPY_SDR_TX, 0, 1.92e6)
     sdr.setFrequency(SOAPY_SDR_TX, 0, 800.0e6)
 
-    #setup a stream (signed int16's)
+    # Setup a stream (signed int16's)
     rxStream = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16)
     txStream = sdr.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CS16)
 
-    #get mtus
+    # Get stream MTUs
     rx_mtu = int(sdr.getStreamMTU(rxStream))
     tx_mtu = int(sdr.getStreamMTU(txStream))
     print("MTU - TX: {}, RX: {}".format(tx_mtu, rx_mtu))
     if (tx_mtu != rx_mtu):
         raise Exception("MTU mismatch")
 
-    #tx buffer could be made a lot shorter, the library *should* fill in the blank space
+    # TX buffer could be made a lot shorter, the library *should* fill in the blank space
     tx_mtu = 6 # IQ samples (12 words)
 
-    #create a re-usable buffers for samples (unsigned signed int16's - although we're transmitting and receiving signed numbers)
-    #double size for I and Q samples
+    # Create a re-usable buffers for samples (unsigned signed int16's - although we're transmitting and receiving signed numbers)
+    # double size for I and Q samples
     rx_buff = numpy.array([0]*2*rx_mtu, numpy.ushort)
     tx_buff = numpy.array([0]*2*tx_mtu, numpy.ushort)
 
-    #prepare fixed bytes in transmit buffer
-    #we transmit a pattern of FFFF FFFF [TS_0]00 [TS_1]00 [TS_2]00 [TS_3]00 [TS_4]00 [TS_5]00 [TS_6]00 [TS_7]00 FFFF FFFF
-    #that is a flag (FFFF FFFF) followed by the 64 bit timestamp, split into 8 bytes and packed into the lsb of each of the DAC words.
-    #DAC samples are left aligned 12-bits, so each byte is left shifted into place
+    # Prepare fixed bytes in transmit buffer
+    # We transmit a pattern of FFFF FFFF [TS_0]00 [TS_1]00 [TS_2]00 [TS_3]00 [TS_4]00 [TS_5]00 [TS_6]00 [TS_7]00 FFFF FFFF
+    # that is a flag (FFFF FFFF) followed by the 64 bit timestamp, split into 8 bytes and packed into the lsb of each of the DAC words.
+    # DAC samples are left aligned 12-bits, so each byte is left shifted into place
     for i in range(2):
         tx_buff[0 + i] = 0xffff
         # 8 x timestamp words
         tx_buff[10 + i] = 0xffff
 
-    #start streaming
+    # Start streaming
     sdr.activateStream(rxStream)
     sdr.activateStream(txStream)
 
-    # open file
+    # Open file
     f = open("rx_dump.txt", "w")
 
-    #here goes
+    # Here goes nothin'
     print("Start test...")
 
-    #ensure buffers in device are empty
+    # Ensure buffers in device are empty
     buffers_read = 0
     while buffers_read < 16:
-        # Read samples
-        sr = sdr.readStream(rxStream, [rx_buff], rx_mtu, timeoutUs=(100 * 1000)) # 100ms timeout
-        if sr.ret < 0:
-            # Skip read on error (likely timeout)
-            continue
+        total_read = 0
+        tmp_buff = numpy.array([0]*2*rx_mtu, numpy.ushort)
+        while total_read < rx_mtu:
+            # Read into temp buffer
+            sr = sdr.readStream(rxStream, [tmp_buff], rx_mtu - total_read, timeoutUs=(100 * 1000)) # 100ms timeout
+            if sr.ret < 0:
+                # Skip read on error (likely timeout)
+                continue
+
+            # Count samples read
+            total_read += sr.ret
 
         # Increment number of buffers read
         buffers_read += 1
 
-    #receive some samples
+    # Receive some samples
     last_time = 0
     rx_buffers = []
     tx_times = []
     buffers_read = 0
     while buffers_read < 20:
-        # Read samples
-        sr = sdr.readStream(rxStream, [rx_buff], rx_mtu, timeoutUs=(100 * 1000)) # 100ms timeout
-        if sr.ret < 0:
-            # Skip read on error (likely timeout)
-            continue
+        # Read samples (may need multiple calls to get all our samples when using ethernet version)
+        total_read = 0
+        tmp_buff = numpy.array([0]*2*rx_mtu, numpy.ushort)
+        first_timestamp = None
+        while total_read < rx_mtu:
+            # Read into temp buffer
+            sr = sdr.readStream(rxStream, [tmp_buff], rx_mtu - total_read, timeoutUs=(100 * 1000)) # 100ms timeout
+            if sr.ret < 0:
+                # Skip read on error (likely timeout)
+                continue
+
+            # Capture timestamp
+            if first_timestamp is None:
+                first_timestamp = sr.timeNs
+
+            # Move samples to real buffer
+            rx_buff[total_read*2:(total_read+sr.ret)*2] = tmp_buff[0:sr.ret*2]
+            total_read += sr.ret
 
         # Report samples
-        print("Buffer: {} - Samples: {}, Flags: {}, Time: {}, TimeDiff: {}".format(buffers_read, sr.ret, sr.flags, sr.timeNs, sr.timeNs - last_time))
-        last_time = sr.timeNs
+        print(f"Buffer: {buffers_read} - Samples: {total_read}, Flags: {sr.flags}, Time: {first_timestamp}, TimeDiff: {first_timestamp - last_time}")
+        last_time = first_timestamp
 
         # Increment number of buffers read
         buffers_read += 1
 
         # Push current rx timestamp and buffer into queue
-        rx_buffers.append((sr.timeNs, numpy.array(rx_buff, copy=True)))
+        rx_buffers.append((last_time, numpy.array(rx_buff, copy=True)))
 
         # Calculate transmit time 4ms in future
-        tx_time = sr.timeNs + (4 * 1000 * 1000)
+        tx_time = last_time + (4 * 1000 * 1000)
 
         # Push transmit time into queue
         tx_times.append(tx_time)
@@ -116,7 +155,7 @@ def main():
             tx_buff[2 + i] = tx_time_byte << 4
 
             # Convert byte to hex
-            tx_time_hex += "{:02x}".format(tx_time_byte)
+            tx_time_hex += f"{tx_time_byte:02x}"
 
         # Send buffer
         res = sdr.writeStream(txStream, [tx_buff], tx_mtu, SOAPY_SDR_HAS_TIME, tx_time, timeoutUs=(100 * 1000)) # 100ms timeout
@@ -124,19 +163,20 @@ def main():
             raise Exception('transmit failed %s' % str(res))
 
         # Dump samples in hex, with 64 bytes per line
-        f.write("RX timeNs (DEC):{}\n".format(sr.timeNs))
-        f.write("TX timeNs (DEC):{}\n".format(tx_time))
-        f.write("TX timeNs (HEX):{}\n".format(tx_time_hex))
-        f.write("RX Data:\n{}\n".format(rx_buff.tobytes().hex('\n', 64)))
+        f.write(f"RX timeNs (DEC):{sr.timeNs}\n")
+        f.write(f"TX timeNs (DEC):{tx_time}\n".format())
+        f.write(f"TX timeNs (HEX):{tx_time_hex}\n")
+        hex_str = rx_buff.tobytes().hex('\n', 64)
+        f.write(f"RX Data:\n{hex_str}\n")
 
-    # close file
+    # Close file
     f.close()
 
-    #stop streaming
+    # Stop streaming
     sdr.deactivateStream(txStream)
     sdr.deactivateStream(rxStream)
 
-    #shutdown the stream
+    # Shutdown the stream
     sdr.closeStream(txStream)
     sdr.closeStream(rxStream)
 
@@ -176,17 +216,17 @@ def main():
             # Buffer doesn't contain timestamp
             print("Buffer {} doesn't contain timestamp".format(index))
 
-    #all done
+    # All done
     print("test complete!")
 
-#declare state machine states
+# Declare state machine states
 class States(enum.Enum):
     HEADER = enum.auto()
     VALUE = enum.auto()
     FOOTER = enum.auto()
     DONE = enum.auto()
 
-#extract timestamp from buffer
+# Extract timestamp from buffer
 def extract_timestamp(rx_buff):
     """Extract timestamp from rx buffer, embedded in tx butter"""
 

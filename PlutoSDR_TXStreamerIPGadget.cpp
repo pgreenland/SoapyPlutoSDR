@@ -3,7 +3,9 @@
 #include <sched.h>
 #include <pthread.h>
 
-#include "PlutoSDR_TXStreamerUSBGadget.hpp"
+#include <arpa/inet.h>
+
+#include "PlutoSDR_TXStreamerIPGadget.hpp"
 
 #include <SoapySDR/Device.hpp>
 #include <SoapySDR/Logger.hpp>
@@ -11,10 +13,10 @@
 #include <SoapySDR/Formats.hpp>
 #include <SoapySDR/Time.hpp>
 
-#include "sdr_usb_gadget_types.h"
+#include "sdr_ip_gadget_types.h"
 
-tx_streamer_usb_gadget::tx_streamer_usb_gadget(const iio_device *_dev, libusb_device_handle* _usb_dev, uint8_t _intfc_num, uint8_t _ep_num, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args, uint32_t _timestamp_every):
-	dev(_dev), usb_dev(_usb_dev), intfc_num(_intfc_num), ep_num(_ep_num), format(_format), timestamp_every(_timestamp_every), queue(16, false)
+tx_streamer_ip_gadget::tx_streamer_ip_gadget(const iio_device *_dev, int _sock_control, int _sock_data, size_t _udp_packet_size, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args, uint32_t _timestamp_every):
+	dev(_dev), sock_control(_sock_control), sock_data(_sock_data), udp_packet_size(_udp_packet_size), format(_format), timestamp_every(_timestamp_every), queue(16, false)
 
 {
 	//default to channel 0, if none were specified
@@ -41,15 +43,6 @@ tx_streamer_usb_gadget::tx_streamer_usb_gadget(const iio_device *_dev, libusb_de
 	// Calculate timestamp size
 	timestamp_size_samples = (channel_list.size() == 2 ? 2 : 1);
 
-	// Calculate buffer size based on timestamping
-	uint32_t buffer_len_timestamp = timestamp_every;
-	if (buffer_len_timestamp > 0) {
-		// Add space for timestamp, based on number of enabled channels
-		// With one channel enabled, a timestamp takes up the space of two samples
-		// With two channels enabled, a timestamp takes up the space of one sample
-		buffer_len_timestamp += timestamp_size_samples;
-	}
-
 	// Calculate buffer length
 	if (args.count("bufflen") != 0) {
 		// Buffer length provided
@@ -67,8 +60,7 @@ tx_streamer_usb_gadget::tx_streamer_usb_gadget(const iio_device *_dev, libusb_de
 		// If buffer length provided, while timestamping enabled, check that two values are equal
 		// for now every buffer is expected to have a timestamp
 		if (    (buffer_length > 0)
-			&& (buffer_len_timestamp > 0)
-			&& (buffer_length != buffer_len_timestamp)
+			&& (timestamp_every > 0)
 		   ) {
 			SoapySDR_logf(SOAPY_SDR_ERROR, "bufflen provided incompatible with timestamp_every");
 			throw std::runtime_error("bufflen provided incompatible with timestamp_every\n");
@@ -77,9 +69,9 @@ tx_streamer_usb_gadget::tx_streamer_usb_gadget(const iio_device *_dev, libusb_de
 		// Set length
 		set_buffer_size(buffer_length);
 
-	} else if (buffer_len_timestamp > 0) {
+	} else if (timestamp_every > 0) {
 		// Buffer length set based on timestamping
-		set_buffer_size(buffer_len_timestamp);
+		set_buffer_size(timestamp_every);
 
 	} else {
 		// Buffer length not provided and timestamping disabled, assume same default as iio tx streamer
@@ -101,14 +93,14 @@ tx_streamer_usb_gadget::tx_streamer_usb_gadget(const iio_device *_dev, libusb_de
 	SoapySDR_logf(SOAPY_SDR_INFO, "Has direct TX copy: %d", (int)direct_copy);
 }
 
-tx_streamer_usb_gadget::~tx_streamer_usb_gadget()
+tx_streamer_ip_gadget::~tx_streamer_ip_gadget()
 {
 	if (thread.joinable()) {
 		_stop();
 	}
 }
 
-int tx_streamer_usb_gadget::send(const void * const *buffs,
+int tx_streamer_ip_gadget::send(const void * const *buffs,
 								 const size_t numElems,
 								 int &flags,
 								 const long long timeNs,
@@ -150,8 +142,9 @@ int tx_streamer_usb_gadget::send(const void * const *buffs,
 
 	if (!curr_buffer) {
 		// Allocate new buffer
-		curr_buffer = std::make_shared<std::vector<uint8_t>>();
-		curr_buffer->resize(buffer_size_samples * sample_size_bytes);
+		curr_buffer = std::make_shared<hdr_payload_t>();
+		curr_buffer->hdr.magic = SDR_IP_GADGET_MAGIC;
+		curr_buffer->payload.resize(buffer_size_samples * sample_size_bytes);
 
 		// Reset samples stored and offset
 		curr_buffer_samples_stored = 0;
@@ -161,11 +154,11 @@ int tx_streamer_usb_gadget::send(const void * const *buffs,
 			// Capture timestamp
 			curr_buffer_timestamp = SoapySDR::timeNsToTicks(timeNs, sample_rate);
 
-			// Place timestamp at start of buffer
-			*((uint64_t*)curr_buffer->data()) = curr_buffer_timestamp;
-
-			// Increment sample count
-			curr_buffer_samples_stored += timestamp_size_samples;
+			// Store timestamp in header
+			curr_buffer->hdr.seqno = curr_buffer_timestamp;
+		} else {
+			// Store current sequence number in header
+			curr_buffer->hdr.seqno = curr_buffer_timestamp;
 		}
 	}
 
@@ -177,11 +170,11 @@ int tx_streamer_usb_gadget::send(const void * const *buffs,
 
 	if (direct_copy && format == PLUTO_SDR_CS16) {
 		// optimize for single TX, 2 channel (I/Q), same endianess direct copy
-		int16_t *dst_ptr = (int16_t *)curr_buffer->data() + curr_buffer_samples_stored * 2;
+		int16_t *dst_ptr = (int16_t *)curr_buffer->payload.data() + curr_buffer_samples_stored * 2;
 		memcpy(dst_ptr, buffs[0], 2 * sizeof(int16_t) * items);
 
 	} else if (direct_copy && format == PLUTO_SDR_CS12) {
-		int16_t *dst_ptr = (int16_t *)curr_buffer->data() + curr_buffer_samples_stored * 2;
+		int16_t *dst_ptr = (int16_t *)curr_buffer->payload.data() + curr_buffer_samples_stored * 2;
 		uint8_t const *samples_cs12 = (uint8_t *)buffs[0];
 
 		for (size_t index = 0; index < items; ++index) {
@@ -198,7 +191,7 @@ int tx_streamer_usb_gadget::send(const void * const *buffs,
 		}
 
 	} else if (direct_copy && format == PLUTO_SDR_CS8) {
-		int16_t *dst_ptr = (int16_t *)curr_buffer->data() + curr_buffer_samples_stored * 2;
+		int16_t *dst_ptr = (int16_t *)curr_buffer->payload.data() + curr_buffer_samples_stored * 2;
 		int8_t const *samples_cs8 = (int8_t *)buffs[0];
 
 		for (size_t index = 0; index < items * 2; ++index) {
@@ -218,7 +211,7 @@ int tx_streamer_usb_gadget::send(const void * const *buffs,
 			iio_channel *chn = channel_list[k];
 			unsigned int index = k / 2;
 
-			uint8_t *dst_ptr = curr_buffer->data() + (curr_buffer_samples_stored * sample_size_bytes) + (sizeof(uint16_t) * k);
+			uint8_t *dst_ptr = curr_buffer->payload.data() + (curr_buffer_samples_stored * sample_size_bytes) + (sizeof(uint16_t) * k);
 
 			// note that TX expects samples MSB aligned, unlike RX which is LSB aligned
 			if (format == PLUTO_SDR_CS16) {
@@ -270,7 +263,7 @@ int tx_streamer_usb_gadget::send(const void * const *buffs,
 	return items;
 }
 
-int tx_streamer_usb_gadget::flush(const long timeoutUs)
+int tx_streamer_ip_gadget::flush(const long timeoutUs)
 {
 	int result = 0;
 
@@ -285,7 +278,7 @@ int tx_streamer_usb_gadget::flush(const long timeoutUs)
 	return result;
 }
 
-int tx_streamer_usb_gadget::start(const int flags,
+int tx_streamer_ip_gadget::start(const int flags,
 								  const long long timeNs,
 								  const size_t numElems)
 {
@@ -295,7 +288,7 @@ int tx_streamer_usb_gadget::start(const int flags,
 	return 0;
 }
 
-int tx_streamer_usb_gadget::stop(const int flags,
+int tx_streamer_ip_gadget::stop(const int flags,
 								 const long long timeNs)
 {
 	// Issue stop command
@@ -304,19 +297,19 @@ int tx_streamer_usb_gadget::stop(const int flags,
 	return 0;
 }
 
-size_t tx_streamer_usb_gadget::get_mtu_size()
+size_t tx_streamer_ip_gadget::get_mtu_size()
 {
 	// Return size of buffer data area
-	return buffer_size_samples - timestamp_size_samples;
+	return buffer_size_samples;
 }
 
-void tx_streamer_usb_gadget::set_samplerate(const size_t _samplerate)
+void tx_streamer_ip_gadget::set_samplerate(const size_t _samplerate)
 {
 	// Store updated sample rate
 	sample_rate = _samplerate;
 }
 
-void tx_streamer_usb_gadget::set_buffer_size(const size_t _buffer_size)
+void tx_streamer_ip_gadget::set_buffer_size(const size_t _buffer_size)
 {
 	if (buffer_size_samples != _buffer_size) {
 		// Is thread currently running?
@@ -338,69 +331,93 @@ void tx_streamer_usb_gadget::set_buffer_size(const size_t _buffer_size)
 	}
 }
 
-void tx_streamer_usb_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t curr_buffer_size_samples)
+void tx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t curr_buffer_size_samples)
 {
-	cmd_usb_start_request_t cmd;
-	size_t curr_buffer_size_bytes;
+	cmd_ip_t cmd;
 
 	// Start stream
-	cmd.enabled_channels = curr_enabled_channels;
-	cmd.buffer_size = curr_buffer_size_samples;
-	int rc = libusb_control_transfer(usb_dev,
-									 LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
-									 SDR_USB_GADGET_COMMAND_START,
-									 SDR_USB_GADGET_COMMAND_TARGET_TX,
-									 intfc_num,
-									 (unsigned char*)&cmd,
-									 sizeof(cmd),
-									 1000);
+	cmd.hdr.magic = SDR_IP_GADGET_MAGIC;
+	cmd.hdr.cmd = SDR_IP_GADGET_COMMAND_START_TX;
+	cmd.start_tx.enabled_channels = curr_enabled_channels;
+	cmd.start_tx.timestamping_enabled = (timestamp_every > 0);
+	cmd.start_tx.buffer_size = curr_buffer_size_samples;
+	if (timestamp_every > 0) cmd.start_tx.buffer_size += timestamp_size_samples;
+	int rc = sendto(sock_control, &cmd, sizeof(cmd.start_tx), 0, NULL, 0);
 	if (rc < 0) {
-		SoapySDR_logf(SOAPY_SDR_ERROR, "Failed to start TX stream (%d)", rc);
+		SoapySDR_logf(SOAPY_SDR_ERROR, "Failed to send start TX stream cmd (%d)", rc);
 		return;
 	}
 
-	// Calculate buffer size in bytes
-	curr_buffer_size_bytes = curr_buffer_size_samples * sample_size_bytes;
-
 	// Declare buffer
-	std::shared_ptr<std::vector<uint8_t>> buffer;
+	std::shared_ptr<hdr_payload_t> buffer;
 
 	// Keep running until told to stop
 	while (!thread_stop.load()) {
 		// Read buffer from queue with 1s timeout
-		if (queue.pop(buffer, true, 1000000) && (buffer->size() == curr_buffer_size_bytes)) {
-			// Retrieved valid data block, send it with 1s timeout
-			int bytes_transferred = 0;
-			int rc = libusb_bulk_transfer(usb_dev, ep_num, buffer->data(), buffer->size(), &bytes_transferred, 1000);
-			if (LIBUSB_SUCCESS != rc || ((size_t)bytes_transferred != buffer->size())) {
-				// Transfer failed
+		if (queue.pop(buffer, true, 1000000)) {
+			// Retrieved valid data block, prepare scatter/gather to send header and data
+			struct iovec iov[2];
+			struct msghdr msg;
+			std::memset(&msg, 0x00, sizeof(msg));
+			msg.msg_iov = iov;
+			msg.msg_iovlen = 2;
+			iov[0].iov_base = &buffer->hdr;
+			iov[0].iov_len = sizeof(buffer->hdr);
+
+			/* Break block down into datagrams for transmission */
+			size_t offset = 0;
+			uint8_t *payload = buffer->payload.data();
+			while (offset < buffer->payload.size())
+			{
+				/* Calculate number of bytes left to send */
+				size_t bytes_to_send = (buffer->payload.size() - offset);
+
+				/* Limit to configured packet size, reserving space for the header */
+				if ((bytes_to_send + sizeof(buffer->hdr)) > udp_packet_size) {
+					bytes_to_send = udp_packet_size - sizeof(buffer->hdr);
+				}
+
+				/* Calculate number of samples to send */
+				size_t samples_to_send = bytes_to_send / sample_size_bytes;
+
+				/* Update bytes to send, effectively rounding to whole number of samples */
+				bytes_to_send = samples_to_send * sample_size_bytes;
+
+				/* Send datagram */
+				iov[1].iov_base = &payload[offset];
+				iov[1].iov_len = bytes_to_send;
+				rc = sendmsg(sock_data, &msg, 0);
+				if (-1 == rc) {
+					// Transfer failed
+				}
+
+				/* Advance timestamp */
+				buffer->hdr.seqno += samples_to_send;
+
+				/* Advance offset */
+				offset += bytes_to_send;
 			}
 		}
 	}
 
 	// Stop stream
-	rc = libusb_control_transfer(usb_dev,
-								 LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
-								 SDR_USB_GADGET_COMMAND_STOP,
-								 SDR_USB_GADGET_COMMAND_TARGET_TX,
-								 intfc_num,
-								 nullptr,
-								 0,
-								 1000);
+	cmd.hdr.magic = SDR_IP_GADGET_MAGIC;
+	cmd.hdr.cmd = SDR_IP_GADGET_COMMAND_STOP_TX;
+	rc = sendto(sock_control, &cmd, sizeof(cmd.stop), 0, NULL, 0);
 	if (rc < 0) {
-		SoapySDR_logf(SOAPY_SDR_ERROR, "Failed to stop TX stream (%d)", rc);
+		SoapySDR_logf(SOAPY_SDR_ERROR, "Failed to send stop TX stream cmd (%d)", rc);
 		return;
 	}
 }
 
-void tx_streamer_usb_gadget::_start(void)
+void tx_streamer_ip_gadget::_start(void)
 {
 	if (!thread.joinable()) {
 		// Reset signal
 		thread_stop = false;
 
 		// Start thread, passing it current settings
-		thread = std::thread(&tx_streamer_usb_gadget::thread_func, this, enabled_channels, buffer_size_samples);
+		thread = std::thread(&tx_streamer_ip_gadget::thread_func, this, enabled_channels, buffer_size_samples);
 
 		// Attempt to increase thread priority
 		int max_prio = sched_get_priority_max(SCHED_RR);
@@ -416,7 +433,7 @@ void tx_streamer_usb_gadget::_start(void)
 	}
 }
 
-void tx_streamer_usb_gadget::_stop(void)
+void tx_streamer_ip_gadget::_stop(void)
 {
 	if (thread.joinable()) {
 		// Signal thread to stop

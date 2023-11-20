@@ -12,8 +12,12 @@ int main(void)
     //args can be user defined or from the enumeration result
     SoapySDRKwargs args = {};
     SoapySDRKwargs_set(&args, "driver", "plutosdr");
-    SoapySDRKwargs_set(&args, "uri", "usb:");
-    SoapySDRKwargs_set(&args, "usb_direct", "1");
+    if (0) {
+        SoapySDRKwargs_set(&args, "uri", "usb:");
+    } else {
+        SoapySDRKwargs_set(&args, "uri", "ip:pluto");
+    }
+    SoapySDRKwargs_set(&args, "direct", "1");
     SoapySDRKwargs_set(&args, "timestamp_every", "1920");
     SoapySDRKwargs_set(&args, "loopback", "1");
     SoapySDRDevice *sdr = SoapySDRDevice_make(&args);
@@ -106,12 +110,20 @@ int main(void)
         int flags; //flags set by receive operation
         long long timeNs; //timestamp for receive buffer
 
-        // Read samples
-        int sr = SoapySDRDevice_readStream(sdr, rxStream, buffs, rx_mtu, &flags, &timeNs, 100000); // 100ms timeout
-        if (sr < 0)
+        // Read until correct number of samples read (ethernet will break blocks down for transmission)
+        size_t samples_read = 0;
+        while (samples_read < rx_mtu)
         {
-            // Skip read on error (likely timeout)
-            continue;
+            // Read samples
+            int sr = SoapySDRDevice_readStream(sdr, rxStream, buffs, rx_mtu - samples_read, &flags, &timeNs, 100000); // 100ms timeout
+            if (sr < 0)
+            {
+                // Skip read on error (likely timeout)
+                continue;
+            }
+
+            // Increment samples read
+            samples_read += sr;
         }
 
         // Increment number of buffers read
@@ -125,21 +137,31 @@ int main(void)
         int flags; //flags set by receive operation
         long long timeNs; //timestamp for receive buffer
 
-        buffs[0] = rx_buff[buffers_read];
-        int sr = SoapySDRDevice_readStream(sdr, rxStream, buffs, rx_mtu, &flags, &timeNs, 100000);
-        if (sr < 0)
+        // Read until correct number of samples read (ethernet will break blocks down for transmission)
+        size_t samples_read = 0;
+        while (samples_read < rx_mtu)
         {
-            // Skip read on error (likely timeout)
-            continue;
+            buffs[0] = &rx_buff[buffers_read][samples_read * 2];
+            int sr = SoapySDRDevice_readStream(sdr, rxStream, buffs, rx_mtu - samples_read, &flags, &timeNs, 100000);
+            if (sr < 0)
+            {
+                // Skip read on error (likely timeout)
+                continue;
+            }
+
+            // Capture timestamp on first read
+            if (samples_read == 0) rx_timestamps[buffers_read] = timeNs;
+
+            // Increment samples read
+            samples_read += sr;
         }
-        rx_timestamps[buffers_read] = timeNs;
 
         // Dump info
-        printf("Buffer: %lu - Samples: %i, Flags: %i, Time: %lli, TimeDiff: %lli\n", buffers_read, sr, flags, timeNs, timeNs - last_time);
-        last_time = timeNs;
+        printf("Buffer: %lu - Samples: %lu, Flags: %i, Time: %lli, TimeDiff: %lli\n", buffers_read, samples_read, flags, rx_timestamps[buffers_read], rx_timestamps[buffers_read] - last_time);
+        last_time = rx_timestamps[buffers_read];
 
         // Calculate transmit time 4ms in future
-        long long tx_time = timeNs + (4 * 1000 * 1000);
+        long long tx_time = last_time + (4 * 1000 * 1000);
 
         // Push transmit time into queue
         tx_timestamps[buffers_read] = tx_time;

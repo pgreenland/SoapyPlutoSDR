@@ -108,7 +108,7 @@ SoapySDR::Stream *SoapyPlutoSDR::setupStream(
 	}
 
 	// Handle any arguments provided during stream creation
-	handle_usb_direct_args(args);
+	handle_direct_args(args);
 	handle_loopback_args(args);
 	handle_timestamp_every_arg(args, direction == SOAPY_SDR_TX);
 
@@ -119,8 +119,16 @@ SoapySDR::Stream *SoapyPlutoSDR::setupStream(
 		iio_channel_attr_write_bool(
 			iio_device_find_channel(dev, "altvoltage0", true), "powerdown", false); // Turn ON RX LO
 
+		if (-1 != ip_sdr_dev_control)
+		{
+			// Use ip streaming gadget
+			this->rx_stream = std::unique_ptr<rx_streamer>(new rx_streamer_ip_gadget (rx_dev,
+																					  ip_sdr_dev_control, ip_sdr_dev_data, udp_packet_size,
+																					  streamFormat, channels, args, timestamp_every_rx));
+
+		}
 		#ifdef HAS_LIBUSB1
-		if (usb_sdr_dev)
+		else if (usb_sdr_dev)
 		{
 			// Use usb streaming gadget
 			this->rx_stream = std::unique_ptr<rx_streamer>(new rx_streamer_usb_gadget (rx_dev,
@@ -144,8 +152,16 @@ SoapySDR::Stream *SoapyPlutoSDR::setupStream(
 		iio_channel_attr_write_bool(
 			iio_device_find_channel(dev, "altvoltage1", true), "powerdown", false); // Turn ON TX LO
 
+		if (-1 != ip_sdr_dev_control)
+		{
+			// Use ip streaming gadget
+			this->tx_stream = std::unique_ptr<tx_streamer>(new tx_streamer_ip_gadget (tx_dev,
+																					  ip_sdr_dev_control, ip_sdr_dev_data, udp_packet_size,
+																					  streamFormat, channels, args, timestamp_every_tx));
+
+		}
 		#ifdef HAS_LIBUSB1
-		if (usb_sdr_dev)
+		else if (usb_sdr_dev)
 		{
 			// Use usb streaming gadget
 			this->tx_stream = std::unique_ptr<tx_streamer>(new tx_streamer_usb_gadget (tx_dev,
