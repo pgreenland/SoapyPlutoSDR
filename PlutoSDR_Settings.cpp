@@ -810,62 +810,66 @@ void SoapyPlutoSDR::setHardwareTime(const long long timeNs, const std::string &w
 
 void SoapyPlutoSDR::handle_direct_args(const SoapySDR::Kwargs & args)
 {
-	if (args.count("direct") != 0) {
-		if (args.at("direct") == "1") {
-			if (0 == strcmp(iio_context_get_name(ctx), "usb")) {
-				// Connected via usb, check if usb support is available to support direct mode
+	std::string direct_val = "0";
+
+	// Lookup legacy value followed by new value
+	if (args.count("usb_direct") != 0) direct_val = args.at("usb_direct");
+	if (args.count("direct") != 0) direct_val = args.at("direct");
+
+	if (direct_val == "1") {
+		if (0 == strcmp(iio_context_get_name(ctx), "usb")) {
+			// Connected via usb, check if usb support is available to support direct mode
 #ifdef HAS_LIBUSB1
-				// Init libusb
-				if (usb_ctx == nullptr) {
-					int rc = libusb_init(&usb_ctx);
-					if (rc < 0) {
-						SoapySDR_logf(SOAPY_SDR_ERROR, "libusb init error (%d)", rc);
-						throw std::runtime_error("libusb init error");
-					}
+			// Init libusb
+			if (usb_ctx == nullptr) {
+				int rc = libusb_init(&usb_ctx);
+				if (rc < 0) {
+					SoapySDR_logf(SOAPY_SDR_ERROR, "libusb init error (%d)", rc);
+					throw std::runtime_error("libusb init error");
 				}
+			}
 
-				if (!this->usb_sdr_dev) {
-					// Open usb device
-					this->open_sdr_usb_gadget();
+			if (!this->usb_sdr_dev) {
+				// Open usb device
+				this->open_sdr_usb_gadget();
 
-					// Notify usb direct mode in use
-					SoapySDR_logf(SOAPY_SDR_INFO, "USB direct mode enabled!");
-				}
+				// Notify usb direct mode in use
+				SoapySDR_logf(SOAPY_SDR_INFO, "USB direct mode enabled!");
+			}
 #else
-				SoapySDR_logf(SOAPY_SDR_ERROR, "usb direct mode is only available when built with LIBUSB");
-				throw std::runtime_error("usb direct mode is only available when built with LIBUSB");
+			SoapySDR_logf(SOAPY_SDR_ERROR, "usb direct mode is only available when built with LIBUSB");
+			throw std::runtime_error("usb direct mode is only available when built with LIBUSB");
 #endif
-			}
-			else if (0 == strcmp(iio_context_get_name(ctx), "network")) {
-				// Connected via network (hopefully physical ethernet)
-				if ((-1 == this->ip_sdr_dev_control) || (-1 == this->ip_sdr_dev_data)) {
-					// Open ip device
-					this->open_sdr_ip_gadget();
-
-					// Notify ip direct mode in use
-					SoapySDR_logf(SOAPY_SDR_INFO, "IP direct mode enabled!");
-				}
-
-				// Grab UDP packet sizes to use if available
-				int udp_packet_size = 1472;
-				if (args.count("udp_packet_size") != 0) {
-					// Retrieve size
-					try {
-						udp_packet_size = std::stoi(args.at("udp_packet_size"));
-					} catch (...) {
-						SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for udp_packet_size, expected number");
-						throw std::runtime_error("invalid value for udp_packet_size, expected number");
-					}
-				}
-				this->udp_packet_size = udp_packet_size;
-			}
 		}
-		else if (args.at("direct") == "0") {
-			// default value
-		} else {
-			SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for direct, expected 0/1");
-			throw std::runtime_error("invalid value for direct, expected 0/1");
+		else if (0 == strcmp(iio_context_get_name(ctx), "network")) {
+			// Connected via network (hopefully physical ethernet)
+			if ((-1 == this->ip_sdr_dev_control) || (-1 == this->ip_sdr_dev_data)) {
+				// Open ip device
+				this->open_sdr_ip_gadget();
+
+				// Notify ip direct mode in use
+				SoapySDR_logf(SOAPY_SDR_INFO, "IP direct mode enabled!");
+			}
+
+			// Grab UDP packet sizes to use if available
+			int udp_packet_size = 1472;
+			if (args.count("udp_packet_size") != 0) {
+				// Retrieve size
+				try {
+					udp_packet_size = std::stoi(args.at("udp_packet_size"));
+				} catch (...) {
+					SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for udp_packet_size, expected number");
+					throw std::runtime_error("invalid value for udp_packet_size, expected number");
+				}
+			}
+			this->udp_packet_size = udp_packet_size;
 		}
+	}
+	else if (direct_val == "0") {
+		// default value
+	} else {
+		SoapySDR_logf(SOAPY_SDR_ERROR, "invalid value for direct, expected 0/1");
+		throw std::runtime_error("invalid value for direct, expected 0/1");
 	}
 }
 
