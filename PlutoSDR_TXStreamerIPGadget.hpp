@@ -86,6 +86,9 @@ class tx_streamer_ip_gadget : public tx_streamer {
 		// Buffer size, excluding timestamp (samples)
 		uint32_t buffer_size_samples;
 
+		// Number of UDP packets required to transfer a buffer
+		size_t packets_per_buffer;
+
 		// Direct copy supported
 		bool direct_copy;
 

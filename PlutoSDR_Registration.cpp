@@ -24,6 +24,9 @@ static std::vector<SoapySDR::Kwargs> find_PlutoSDR(const SoapySDR::Kwargs &args)
 	std::vector<std::string> backends = {"local", "usb=0456:b673", "ip"};
 	for (std::vector<std::string>::iterator it = backends.begin(); it != backends.end(); it++) {
 
+		// This whole block of nastiness doesn't always work...seems a local iio instance can interfere with a hostname
+		options.clear();
+
 		if (*it == "usb=0456:b673") {
 #ifdef HAS_LIBUSB1
 			// Abort early if no known ADALM-Pluto USB VID:PID (0456:b673) is found,

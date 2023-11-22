@@ -109,57 +109,61 @@ int tx_streamer_ip_gadget::send(const void * const *buffs,
 								 const long long timeNs,
 								 const long timeoutUs)
 {
+	// Convert timestamp, in case we need to use it
+	uint64_t temp_timestamp = SoapySDR::timeNsToTicks(timeNs, sample_rate);
+
 	// Check if timestamping enabled
-	if (timestamp_every > 0) {
-		// Timestamping enabled, check time provided
-		if (0 == (flags & SOAPY_SDR_HAS_TIME)) {
-			// No time provided
-			SoapySDR_logf(SOAPY_SDR_ERROR, "Timestamping enabled but no timestamp provided");
-			throw std::runtime_error("Timestamping enabled but no timestamp provided");
+	if (	curr_buffer
+		 && (timestamp_every > 0)
+		 && (flags & SOAPY_SDR_HAS_TIME)
+	   ) {
+		// Buffer available, timestamping enabled and time provided
+		// Calculate timestamp difference and sample count difference
+		uint64_t timestamp_diff = (temp_timestamp - curr_buffer_timestamp);
+		size_t curr_buffer_free_samples = buffer_size_samples - curr_buffer_samples_stored;
+
+		// Calculate how many samples to add to buffer
+		// No need to reset samples as buffer is zero initialized when created
+		size_t samples_to_fill = std::min(timestamp_diff, curr_buffer_free_samples);
+
+		// Increment sample count
+		curr_buffer_samples_stored += samples_to_fill;
+
+		// Increment timestamp ticks
+		curr_buffer_timestamp += samples_to_fill;
+
+		// Flush buffer if full
+		if (curr_buffer_samples_stored == buffer_size_samples) {
+			// Flush and return error code
+			int rc = flush(timeoutUs);
+			if (0 != rc) return rc;
 		}
+	}
 
-		// Check if a buffer is open
-		if (curr_buffer) {
-			// Buffer already open, convert first sample timestamp
-			uint64_t temp_timestamp = SoapySDR::timeNsToTicks(timeNs, sample_rate);
-
-			// Calculate timestamp difference and sample count difference
-			uint64_t timestamp_diff = (temp_timestamp - curr_buffer_timestamp);
-			size_t curr_buffer_free_samples = buffer_size_samples - curr_buffer_samples_stored;
-
-			// Calculate how many samples to add to buffer
-			// No need to reset samples as buffer is zero initialized when created
-			size_t samples_to_fill = std::min(timestamp_diff, curr_buffer_free_samples);
-
-			// Increment sample count
-			curr_buffer_samples_stored += samples_to_fill;
-
-			// Flush buffer if full
-			if (curr_buffer_samples_stored == buffer_size_samples) {
-				// Flush and return error code
-				int rc = flush(timeoutUs);
-				if (0 != rc) return rc;
+	if (	(timestamp_every > 0)
+		 && (flags & SOAPY_SDR_HAS_TIME)
+	   ) {
+			// Timestamping enabled and timestamp provided, capture it
+			if (temp_timestamp < curr_buffer_timestamp) {
+				// Warn timestamp has jumped backwards
+				SoapySDR_logf(SOAPY_SDR_WARNING, "Backwards timestamp step!");
 			}
-		}
+
+			// Update current timestamp
+			curr_buffer_timestamp = temp_timestamp;
 	}
 
 	if (!curr_buffer) {
 		// Allocate new buffer
 		curr_buffer = std::make_shared<hdr_payload_t>();
 		curr_buffer->hdr.magic = SDR_IP_GADGET_MAGIC;
+		curr_buffer->hdr.block_index = 0;
+		curr_buffer->hdr.block_count = packets_per_buffer;
+		curr_buffer->hdr.seqno = curr_buffer_timestamp;
 		curr_buffer->payload.resize(buffer_size_samples * sample_size_bytes);
 
-		// Reset samples stored and offset
+		// Reset samples stored
 		curr_buffer_samples_stored = 0;
-
-		// Check if timestamping enabled
-		if (timestamp_every > 0) {
-			// Capture timestamp
-			curr_buffer_timestamp = SoapySDR::timeNsToTicks(timeNs, sample_rate);
-		}
-
-		// Store current sequence number in header
-		curr_buffer->hdr.seqno = curr_buffer_timestamp;
 	}
 
 	// Work out how many items to copy
@@ -324,6 +328,11 @@ void tx_streamer_ip_gadget::set_buffer_size(const size_t _buffer_size)
 		// Save new buffer size
 		buffer_size_samples = _buffer_size;
 
+		// Re-calculate how many packets are required to transfer a buffer
+		size_t udp_payload_size = udp_packet_size - sizeof(data_ip_hdr_t);
+		size_t iio_buffer_size = buffer_size_samples * sample_size_bytes;
+		packets_per_buffer = (iio_buffer_size + (udp_payload_size - 1U)) / udp_payload_size;
+
 		if (was_running) {
 			// Start stream
 			_start();
@@ -377,12 +386,6 @@ void tx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 					bytes_to_send = udp_packet_size - sizeof(buffer->hdr);
 				}
 
-				/* Calculate number of samples to send */
-				size_t samples_to_send = bytes_to_send / sample_size_bytes;
-
-				/* Update bytes to send, effectively rounding to whole number of samples */
-				bytes_to_send = samples_to_send * sample_size_bytes;
-
 				/* Send datagram */
 				iov[1].iov_base = &payload[offset];
 				iov[1].iov_len = bytes_to_send;
@@ -391,11 +394,11 @@ void tx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 					// Transfer failed
 				}
 
-				/* Advance timestamp */
-				buffer->hdr.seqno += samples_to_send;
-
 				/* Advance offset */
 				offset += bytes_to_send;
+
+				/* Advance block index */
+				buffer->hdr.block_index++;
 			}
 		}
 	}

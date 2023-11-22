@@ -114,7 +114,7 @@ size_t rx_streamer_ip_gadget::recv(void * const *buffs,
 									long long &timeNs,
 									const long timeoutUs)
 {
-	while (!curr_buffer) {
+	if (!curr_buffer) {
 		// Need to dequeue a new buffer
 		if (!queue.pop(curr_buffer, (timeoutUs > 0), timeoutUs)) {
 			// Failed to dequeue buffer within timeout
@@ -126,14 +126,6 @@ size_t rx_streamer_ip_gadget::recv(void * const *buffs,
 
 		// Reset offset
 		curr_buffer_offset = 0;
-
-		// Check timestamp or sequence number
-		if (curr_buffer->hdr.seqno < curr_buffer_timestamp) {
-			// Packets are arriving out of order...drop this one
-			SoapySDR_logf(SOAPY_SDR_WARNING, "Dropped out of order datagram %" PRIu64 " - %" PRIu64 " = %" PRIu64,
-						  curr_buffer->hdr.seqno, curr_buffer_timestamp, (curr_buffer_timestamp - curr_buffer->hdr.seqno));
-			continue;
-		}
 
 		// Grab timestamp or sequence number from header
 		curr_buffer_timestamp = curr_buffer->hdr.seqno;
@@ -360,46 +352,134 @@ void rx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 	std::shared_ptr<hdr_payload_t> buffer = std::make_shared<hdr_payload_t>();
 	buffer->payload.resize(curr_buffer_size_bytes);
 
-	// Keep running until told to stop
-	size_t buffers_to_drop = 32; // Ensure anything kicking around in the queues and buffers is dropped
+	// Prepare scatter/gather structure
 	struct iovec iov[2];
 	struct msghdr msg;
 	std::memset(&msg, 0x00, sizeof(msg));
 	msg.msg_iov = iov;
 	msg.msg_iovlen = 2;
 	iov[0].iov_len = sizeof(buffer->hdr);
-	iov[1].iov_len = buffer->payload.size();
+	iov[0].iov_base = &buffer->hdr;
+
+	// Create shorthand buffer pointer
+	uint8_t *payload = buffer->payload.data();
+
+	// Track used buffer space
+	size_t buffer_used = 0;
+
+	// Track buffer index and count
+	uint8_t block_index = 0;
+	uint8_t block_count = 0;
+
+	// Track timestamps
+	uint64_t last_seqno = 0;
+
+	// Keep running until told to stop
+	size_t buffers_to_drop = 32; // Ensure anything kicking around in the queues and buffers is dropped
 	while (!thread_stop.load()) {
-		iov[0].iov_base = &buffer->hdr;
-		iov[1].iov_base = buffer->payload.data();
+		// Update scatter/gather
+		iov[1].iov_base = &payload[buffer_used];
+		iov[1].iov_len = buffer->payload.size() - buffer_used;
+
+		// Fetch next datagram from socket
 		rc = recvmsg(sock_data, &msg, 0);
-		if (-1 != rc) {
-			/* Receive completed */
-			if (	((size_t)rc > sizeof(buffer->hdr))
-				 && (SDR_IP_GADGET_MAGIC == buffer->hdr.magic)
-			   )
+		if (-1 == rc) {
+			if ((EWOULDBLOCK != errno) && (EAGAIN != errno))
 			{
-				// Size and magic are correct
-				if (0 == buffers_to_drop) {
-					// Resize buffer to data size
-					buffer->payload.resize((size_t)rc - sizeof(buffer->hdr));
+				/* Receive failed and error was not a timeout */
+				SoapySDR_logf(SOAPY_SDR_ERROR, "Failed to receive on data socket %s(%d)", strerror(errno), errno);
+			}
+			continue;
+		}
 
-					// Push buffer into fifo without blocking
-					queue.push(buffer, false, 0);
-				} else {
-					// Still within initial drop range, discard buffer
-					buffers_to_drop--;
-				}
+		/* Receive succeeded, what did we win? Check magic */
+		if (    ((size_t)rc < sizeof(data_ip_hdr_t))
+			 || (SDR_IP_GADGET_MAGIC != buffer->hdr.magic)
+		   ) {
+			/* Wrong header size or bad magic, possibly a naughty network application or an honest mistake */
+			continue;
+		}
 
-				// Create new buffer
-				buffer = std::make_shared<hdr_payload_t>();
-				buffer->payload.resize(curr_buffer_size_bytes);
+		// Size and magic are correct
+		if (buffers_to_drop > 0) {
+			// Still within initial drop range, discard buffer
+			buffers_to_drop--;
+			continue;
+		}
+
+		// Remove packet header length from data remaining
+		rc -= sizeof(data_ip_hdr_t);
+
+		// Check packet sequence number / timestamp, discarding any out of order packets
+		// Note this is fragile against time warps
+		if (buffer->hdr.seqno < last_seqno)
+		{
+			SoapySDR_logf(SOAPY_SDR_WARNING, "Dropped out of order datagram %" PRIu64 " - %" PRIu64 " = %" PRIu64,
+							buffer->hdr.seqno, last_seqno, (last_seqno - buffer->hdr.seqno));
+			continue;
+		}
+
+		// Are we starting a new buffer
+		if (0 == buffer_used)
+		{
+			/* Check packet starts sequence */
+			if (0 != buffer->hdr.block_index)
+			{
+				/* Drop packet, waiting for sequence start */
+				continue;
+			}
+
+			/* Reset index and store total */
+			block_index = 0;
+			block_count = buffer->hdr.block_count;
+
+			/* Is timestamping enabled? */
+			if (timestamp_every)
+			{
+				/* Yes, copy timestamp from header to working data and start of buffer */
+				last_seqno = buffer->hdr.seqno;
 			}
 		}
-		else if ((EWOULDBLOCK != errno) && (EAGAIN != errno))
+		else
 		{
-			/* Receive failed and error was not a timeout */
-			SoapySDR_logf(SOAPY_SDR_ERROR, "Failed to receive on data socket %s(%d)", strerror(errno), errno);
+			/* Check index, total and timestamp match */
+			if (	(block_index != buffer->hdr.block_index)
+				 || (block_count != buffer->hdr.block_count)
+				 || (last_seqno != buffer->hdr.seqno)
+			   )
+			{
+				/* Either an out of order, or duplicate block, reset buffer */
+				buffer_used = 0;
+
+				/* Drop packet */
+				continue;
+			}
+		}
+
+		/* Update buffer used */
+		buffer_used += (size_t)rc;
+
+		/* Increment index */
+		block_index++;
+
+		/* Is buffer full? */
+		if (curr_buffer_size_bytes == buffer_used)
+		{
+			// Push buffer into fifo without blocking
+			queue.push(buffer, false, 0);
+
+			// Create new buffer
+			buffer = std::make_shared<hdr_payload_t>();
+			buffer->payload.resize(curr_buffer_size_bytes);
+
+			// Reset buffer used
+			buffer_used = 0;
+
+			// Update pointer
+			payload = buffer->payload.data();
+
+			// Update scatter/gather
+			iov[0].iov_base = &buffer->hdr;
 		}
 	}
 

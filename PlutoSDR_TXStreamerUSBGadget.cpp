@@ -114,37 +114,34 @@ int tx_streamer_usb_gadget::send(const void * const *buffs,
 								 const long long timeNs,
 								 const long timeoutUs)
 {
+	// Convert timestamp, in case we need to use it
+	uint64_t temp_timestamp = SoapySDR::timeNsToTicks(timeNs, sample_rate);
+
 	// Check if timestamping enabled
-	if (timestamp_every > 0) {
-		// Timestamping enabled, check time provided
-		if (0 == (flags & SOAPY_SDR_HAS_TIME)) {
-			// No time provided
-			SoapySDR_logf(SOAPY_SDR_ERROR, "Timestamping enabled but no timestamp provided");
-			throw std::runtime_error("Timestamping enabled but no timestamp provided");
-		}
+	if (	curr_buffer
+		 && (timestamp_every > 0)
+		 && (flags & SOAPY_SDR_HAS_TIME)
+	   ) {
+		// Buffer available, timestamping enabled and time provided
+		// Calculate timestamp difference and sample count difference
+		uint64_t timestamp_diff = (temp_timestamp - curr_buffer_timestamp);
+		size_t curr_buffer_free_samples = buffer_size_samples - curr_buffer_samples_stored;
 
-		// Check if a buffer is open
-		if (curr_buffer) {
-			// Buffer already open, convert first sample timestamp
-			uint64_t temp_timestamp = SoapySDR::timeNsToTicks(timeNs, sample_rate);
+		// Calculate how many samples to add to buffer
+		// No need to reset samples as buffer is zero initialized when created
+		size_t samples_to_fill = std::min(timestamp_diff, curr_buffer_free_samples);
 
-			// Calculate timestamp difference and sample count difference
-			uint64_t timestamp_diff = (temp_timestamp - curr_buffer_timestamp);
-			size_t curr_buffer_free_samples = buffer_size_samples - curr_buffer_samples_stored;
+		// Increment sample count
+		curr_buffer_samples_stored += samples_to_fill;
 
-			// Calculate how many samples to add to buffer
-			// No need to reset samples as buffer is zero initialized when created
-			size_t samples_to_fill = std::min(timestamp_diff, curr_buffer_free_samples);
+		// Increment timestamp ticks
+		curr_buffer_timestamp += samples_to_fill;
 
-			// Increment sample count
-			curr_buffer_samples_stored += samples_to_fill;
-
-			// Flush buffer if full
-			if (curr_buffer_samples_stored == buffer_size_samples) {
-				// Flush and return error code
-				int rc = flush(timeoutUs);
-				if (0 != rc) return rc;
-			}
+		// Flush buffer if full
+		if (curr_buffer_samples_stored == buffer_size_samples) {
+			// Flush and return error code
+			int rc = flush(timeoutUs);
+			if (0 != rc) return rc;
 		}
 	}
 
@@ -158,8 +155,14 @@ int tx_streamer_usb_gadget::send(const void * const *buffs,
 
 		// Check if timestamping enabled
 		if (timestamp_every > 0) {
+			// Timestamping enabled and timestamp provided, capture it
+			if (temp_timestamp < curr_buffer_timestamp) {
+				// Warn timestamp has jumped backwards
+				SoapySDR_logf(SOAPY_SDR_WARNING, "Backwards timestamp step!");
+			}
+
 			// Capture timestamp
-			curr_buffer_timestamp = SoapySDR::timeNsToTicks(timeNs, sample_rate);
+			curr_buffer_timestamp = temp_timestamp;
 
 			// Place timestamp at start of buffer
 			*((uint64_t*)curr_buffer->data()) = curr_buffer_timestamp;

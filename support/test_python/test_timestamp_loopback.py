@@ -89,17 +89,11 @@ def main():
     # Ensure buffers in device are empty
     buffers_read = 0
     while buffers_read < 16:
-        total_read = 0
-        tmp_buff = numpy.array([0]*2*rx_mtu, numpy.ushort)
-        while total_read < rx_mtu:
-            # Read into temp buffer
-            sr = sdr.readStream(rxStream, [tmp_buff], rx_mtu - total_read, timeoutUs=(100 * 1000)) # 100ms timeout
-            if sr.ret < 0:
-                # Skip read on error (likely timeout)
-                continue
-
-            # Count samples read
-            total_read += sr.ret
+        # Read samples
+        sr = sdr.readStream(rxStream, [rx_buff], rx_mtu, timeoutUs=(100 * 1000)) # 100ms timeout
+        if sr.ret < 0:
+            # Skip read on error (likely timeout)
+            continue
 
         # Increment number of buffers read
         buffers_read += 1
@@ -110,37 +104,24 @@ def main():
     tx_times = []
     buffers_read = 0
     while buffers_read < 20:
-        # Read samples (may need multiple calls to get all our samples when using ethernet version)
-        total_read = 0
-        tmp_buff = numpy.array([0]*2*rx_mtu, numpy.ushort)
-        first_timestamp = None
-        while total_read < rx_mtu:
-            # Read into temp buffer
-            sr = sdr.readStream(rxStream, [tmp_buff], rx_mtu - total_read, timeoutUs=(100 * 1000)) # 100ms timeout
-            if sr.ret < 0:
-                # Skip read on error (likely timeout)
-                continue
-
-            # Capture timestamp
-            if first_timestamp is None:
-                first_timestamp = sr.timeNs
-
-            # Move samples to real buffer
-            rx_buff[total_read*2:(total_read+sr.ret)*2] = tmp_buff[0:sr.ret*2]
-            total_read += sr.ret
+        # Read samples
+        sr = sdr.readStream(rxStream, [rx_buff], rx_mtu, timeoutUs=(100 * 1000)) # 100ms timeout
+        if sr.ret < 0:
+            # Skip read on error (likely timeout)
+            continue
 
         # Report samples
-        print(f"Buffer: {buffers_read} - Samples: {total_read}, Flags: {sr.flags}, Time: {first_timestamp}, TimeDiff: {first_timestamp - last_time}")
-        last_time = first_timestamp
+        print(f"Buffer: {buffers_read} - Samples: {sr.ret}, Flags: {sr.flags}, Time: {sr.timeNs}, TimeDiff: {sr.timeNs - last_time}")
+        last_time = sr.timeNs
 
         # Increment number of buffers read
         buffers_read += 1
 
         # Push current rx timestamp and buffer into queue
-        rx_buffers.append((last_time, numpy.array(rx_buff, copy=True)))
+        rx_buffers.append((sr.timeNs, numpy.array(rx_buff, copy=True)))
 
         # Calculate transmit time 4ms in future
-        tx_time = last_time + (4 * 1000 * 1000)
+        tx_time = sr.timeNs + (4 * 1000 * 1000)
 
         # Push transmit time into queue
         tx_times.append(tx_time)
