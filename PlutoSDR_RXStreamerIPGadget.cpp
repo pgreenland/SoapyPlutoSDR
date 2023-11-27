@@ -127,8 +127,8 @@ size_t rx_streamer_ip_gadget::recv(void * const *buffs,
 		// Reset offset
 		curr_buffer_offset = 0;
 
-		// Grab timestamp or sequence number from header
-		curr_buffer_timestamp = curr_buffer->hdr.seqno;
+		// Grab timestamp or sequence number
+		curr_buffer_timestamp = curr_buffer->seqno;
 	}
 
 	// Work out how many items to copy
@@ -348,8 +348,11 @@ void rx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 	// Calculate buffer size in bytes
 	curr_buffer_size_bytes = curr_buffer_size_samples * sample_size_bytes;
 
+	// Allocate temporary header
+	data_ip_hdr_t hdr;
+
 	// Allocate buffer
-	std::shared_ptr<hdr_payload_t> buffer = std::make_shared<hdr_payload_t>();
+	std::shared_ptr<seq_payload_t> buffer = std::make_shared<seq_payload_t>();
 	buffer->payload.resize(curr_buffer_size_bytes);
 
 	// Prepare scatter/gather structure
@@ -358,8 +361,8 @@ void rx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 	std::memset(&msg, 0x00, sizeof(msg));
 	msg.msg_iov = iov;
 	msg.msg_iovlen = 2;
-	iov[0].iov_len = sizeof(buffer->hdr);
-	iov[0].iov_base = &buffer->hdr;
+	iov[0].iov_len = sizeof(hdr);
+	iov[0].iov_base = &hdr;
 
 	// Create shorthand buffer pointer
 	uint8_t *payload = buffer->payload.data();
@@ -394,16 +397,9 @@ void rx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 
 		/* Receive succeeded, what did we win? Check magic */
 		if (    ((size_t)rc < sizeof(data_ip_hdr_t))
-			 || (SDR_IP_GADGET_MAGIC != buffer->hdr.magic)
+			 || (SDR_IP_GADGET_MAGIC != hdr.magic)
 		   ) {
 			/* Wrong header size or bad magic, possibly a naughty network application or an honest mistake */
-			continue;
-		}
-
-		// Size and magic are correct
-		if (buffers_to_drop > 0) {
-			// Still within initial drop range, discard buffer
-			buffers_to_drop--;
 			continue;
 		}
 
@@ -412,10 +408,10 @@ void rx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 
 		// Check packet sequence number / timestamp, discarding any out of order packets
 		// Note this is fragile against time warps
-		if (buffer->hdr.seqno < last_seqno)
+		if (hdr.seqno < last_seqno)
 		{
 			SoapySDR_logf(SOAPY_SDR_WARNING, "Dropped out of order datagram %" PRIu64 " - %" PRIu64 " = %" PRIu64,
-							buffer->hdr.seqno, last_seqno, (last_seqno - buffer->hdr.seqno));
+							hdr.seqno, last_seqno, (last_seqno - hdr.seqno));
 			continue;
 		}
 
@@ -423,7 +419,7 @@ void rx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 		if (0 == buffer_used)
 		{
 			/* Check packet starts sequence */
-			if (0 != buffer->hdr.block_index)
+			if (0 != hdr.block_index)
 			{
 				/* Drop packet, waiting for sequence start */
 				continue;
@@ -431,21 +427,21 @@ void rx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 
 			/* Reset index and store total */
 			block_index = 0;
-			block_count = buffer->hdr.block_count;
+			block_count = hdr.block_count;
 
 			/* Is timestamping enabled? */
 			if (timestamp_every)
 			{
-				/* Yes, copy timestamp from header to working data and start of buffer */
-				last_seqno = buffer->hdr.seqno;
+				/* Yes, copy timestamp from header to working data */
+				last_seqno = hdr.seqno;
 			}
 		}
 		else
 		{
 			/* Check index, total and timestamp match */
-			if (	(block_index != buffer->hdr.block_index)
-				 || (block_count != buffer->hdr.block_count)
-				 || (last_seqno != buffer->hdr.seqno)
+			if (	(block_index != hdr.block_index)
+				 || (block_count != hdr.block_count)
+				 || (last_seqno != hdr.seqno)
 			   )
 			{
 				/* Either an out of order, or duplicate block, reset buffer */
@@ -465,11 +461,23 @@ void rx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 		/* Is buffer full? */
 		if (curr_buffer_size_bytes == buffer_used)
 		{
+			if (buffers_to_drop > 0) {
+				// Still within initial drop range, discard buffer
+				buffers_to_drop--;
+
+				// Reset buffer used
+				buffer_used = 0;
+
+				// Keep going
+				continue;
+			}
+
 			// Push buffer into fifo without blocking
+			buffer->seqno = hdr.seqno;
 			queue.push(buffer, false, 0);
 
 			// Create new buffer
-			buffer = std::make_shared<hdr_payload_t>();
+			buffer = std::make_shared<seq_payload_t>();
 			buffer->payload.resize(curr_buffer_size_bytes);
 
 			// Reset buffer used
@@ -477,9 +485,6 @@ void rx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 
 			// Update pointer
 			payload = buffer->payload.data();
-
-			// Update scatter/gather
-			iov[0].iov_base = &buffer->hdr;
 		}
 	}
 

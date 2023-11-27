@@ -155,11 +155,8 @@ int tx_streamer_ip_gadget::send(const void * const *buffs,
 
 	if (!curr_buffer) {
 		// Allocate new buffer
-		curr_buffer = std::make_shared<hdr_payload_t>();
-		curr_buffer->hdr.magic = SDR_IP_GADGET_MAGIC;
-		curr_buffer->hdr.block_index = 0;
-		curr_buffer->hdr.block_count = packets_per_buffer;
-		curr_buffer->hdr.seqno = curr_buffer_timestamp;
+		curr_buffer = std::make_shared<seq_payload_t>();
+		curr_buffer->seqno = curr_buffer_timestamp;
 		curr_buffer->payload.resize(buffer_size_samples * sample_size_bytes);
 
 		// Reset samples stored
@@ -357,51 +354,79 @@ void tx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 		return;
 	}
 
+	// Declare scatter gather array
+	struct mmsghdr *arr_mmsg_hdrs = new struct mmsghdr[packets_per_buffer];
+	struct iovec *arr_iovs = new struct iovec[2 * packets_per_buffer];
+	data_ip_hdr_t *arr_pkt_hdrs = new data_ip_hdr_t[packets_per_buffer];
+
+	// Calculate how much data can fit in each udp packet once header has been accounted for
+	size_t udp_payload_size = udp_packet_size - sizeof(data_ip_hdr_t);
+
+	// Pre-populate fixed fields
+	for (size_t i = 0; i < packets_per_buffer; i++)
+	{
+		// Reset objects
+		std::memset(&arr_mmsg_hdrs[i], 0x00, sizeof(arr_mmsg_hdrs[0]));
+		std::memset(&arr_iovs[2 * i], 0x00, 2 * sizeof(arr_iovs[0]));
+		std::memset(&arr_pkt_hdrs[i], 0x00, sizeof(arr_pkt_hdrs[0]));
+
+		// Each message makes use of two IOVs (one for the header and one for the data)
+		arr_mmsg_hdrs[i].msg_hdr.msg_iov = &arr_iovs[2 * i];
+		arr_mmsg_hdrs[i].msg_hdr.msg_iovlen = 2;
+
+		// First IOV of each pair points at packet header, next will point at payload and be updated just before tranmission
+		arr_iovs[(2 * i) + 0].iov_base = &arr_pkt_hdrs[i];
+		arr_iovs[(2 * i) + 0].iov_len = sizeof(data_ip_hdr_t);
+		arr_iovs[(2 * i) + 1].iov_base = NULL;
+		if (i < (packets_per_buffer - 1))
+		{
+			/* Not the last packet, therefore must be full */
+			arr_iovs[(2 * i) + 1].iov_len = udp_packet_size - sizeof(data_ip_hdr_t);
+		}
+		else
+		{
+			/* Last packet, work out how many bytes of the payload it will contain */
+			size_t iio_buffer_size = buffer_size_samples * sample_size_bytes;
+			arr_iovs[(2 * i) + 1].iov_len = sizeof(data_ip_hdr_t) + (iio_buffer_size % udp_payload_size);
+		}
+
+		/* Prepare packet headers, just need to fill in the sequence number at transmission time */
+		arr_pkt_hdrs[i].magic = SDR_IP_GADGET_MAGIC;
+		arr_pkt_hdrs[i].block_index = (uint8_t)i;
+		arr_pkt_hdrs[i].block_count = (uint8_t)packets_per_buffer;
+	}
+
 	// Declare buffer
-	std::shared_ptr<hdr_payload_t> buffer;
+	std::shared_ptr<seq_payload_t> buffer;
 
 	// Keep running until told to stop
 	while (!thread_stop.load()) {
 		// Read buffer from queue with 1s timeout
 		if (queue.pop(buffer, true, 1000000)) {
-			// Retrieved valid data block, prepare scatter/gather to send header and data
-			struct iovec iov[2];
-			struct msghdr msg;
-			std::memset(&msg, 0x00, sizeof(msg));
-			msg.msg_iov = iov;
-			msg.msg_iovlen = 2;
-			iov[0].iov_base = &buffer->hdr;
-			iov[0].iov_len = sizeof(buffer->hdr);
-
-			/* Break block down into datagrams for transmission */
-			size_t offset = 0;
+			// Retrieved valid data block, update scatter/gather to send header and data
 			uint8_t *payload = buffer->payload.data();
-			while (offset < buffer->payload.size())
+			for (size_t i = 0; i < packets_per_buffer; i++)
 			{
-				/* Calculate number of bytes left to send */
-				size_t bytes_to_send = (buffer->payload.size() - offset);
+				/* Set sequence number for packet */
+				arr_pkt_hdrs[i].seqno = buffer->seqno;
 
-				/* Limit to configured packet size, reserving space for the header */
-				if ((bytes_to_send + sizeof(buffer->hdr)) > udp_packet_size) {
-					bytes_to_send = udp_packet_size - sizeof(buffer->hdr);
-				}
+				/* Set data pointer for packet */
+				arr_iovs[(2 * i) + 1].iov_base = payload;
+				payload += udp_payload_size;
+			}
 
-				/* Send datagram */
-				iov[1].iov_base = &payload[offset];
-				iov[1].iov_len = bytes_to_send;
-				rc = sendmsg(sock_data, &msg, 0);
-				if (-1 == rc) {
-					// Transfer failed
-				}
-
-				/* Advance offset */
-				offset += bytes_to_send;
-
-				/* Advance block index */
-				buffer->hdr.block_index++;
+			/* Send all datagrams with single system call :-) */
+			if ((int)packets_per_buffer != sendmmsg(sock_data, arr_mmsg_hdrs, packets_per_buffer, 0))
+			{
+				/* Send failed */
 			}
 		}
 	}
+
+	// Free buffers
+	delete arr_mmsg_hdrs;
+	delete arr_iovs;
+	delete arr_pkt_hdrs;
 
 	// Stop stream
 	cmd.hdr.magic = SDR_IP_GADGET_MAGIC;

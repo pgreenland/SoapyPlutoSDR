@@ -66,7 +66,7 @@ class tx_streamer_ip_gadget : public tx_streamer {
 		std::atomic<bool> thread_stop;
 
 		// Queue
-		TSQueue<std::shared_ptr<hdr_payload_t>> queue;
+		TSQueue<std::shared_ptr<seq_payload_t>> queue;
 
 		// IIO channel list
 		std::vector<iio_channel*> channel_list;
@@ -93,7 +93,7 @@ class tx_streamer_ip_gadget : public tx_streamer {
 		bool direct_copy;
 
 		// Current buffer being processed by send
-		std::shared_ptr<hdr_payload_t> curr_buffer;
+		std::shared_ptr<seq_payload_t> curr_buffer;
 		size_t curr_buffer_samples_stored;
 		uint64_t curr_buffer_timestamp;
 
