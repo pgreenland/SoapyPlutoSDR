@@ -14,6 +14,8 @@
 #include <SoapySDR/Formats.hpp>
 #include <SoapySDR/Time.hpp>
 
+#include "PlutoSDR_TimestampEvery.hpp"
+
 #include "sdr_ip_gadget_types.h"
 
 rx_streamer_ip_gadget::rx_streamer_ip_gadget(const iio_device *_dev, int _sock_control, int _sock_data, size_t _udp_packet_size, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args, uint32_t _timestamp_every):
@@ -82,6 +84,9 @@ rx_streamer_ip_gadget::rx_streamer_ip_gadget(const iio_device *_dev, int _sock_c
 		fixed_buffer_size = false;
 		set_buffer_size_by_samplerate(sample_rate);
 	}
+
+	// Setup timestamping
+	SoapyPlutoSDR_TimestampEvery::update_device_timestamp_every(dev, timestamp_every, channel_list.size());
 
 	// Assume direct copying is supported
 	direct_copy = true;

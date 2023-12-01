@@ -369,7 +369,5 @@ class SoapyPlutoSDR : public SoapySDR::Device{
 		int ip_sdr_dev_data;
 		size_t udp_packet_size;
 		void open_sdr_ip_gadget(void);
-
-		void update_device_timestamp_every(struct iio_device *dev, uint32_t value);
 };
 

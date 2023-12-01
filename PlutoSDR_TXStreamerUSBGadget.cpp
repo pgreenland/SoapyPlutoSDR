@@ -11,6 +11,8 @@
 #include <SoapySDR/Formats.hpp>
 #include <SoapySDR/Time.hpp>
 
+#include "PlutoSDR_TimestampEvery.hpp"
+
 #include "sdr_usb_gadget_types.h"
 
 tx_streamer_usb_gadget::tx_streamer_usb_gadget(const iio_device *_dev, libusb_device_handle* _usb_dev, uint8_t _intfc_num, uint8_t _ep_num, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args, uint32_t _timestamp_every):
@@ -85,6 +87,9 @@ tx_streamer_usb_gadget::tx_streamer_usb_gadget(const iio_device *_dev, libusb_de
 		// Buffer length not provided and timestamping disabled, assume same default as iio tx streamer
 		set_buffer_size(4096);
 	}
+
+	// Setup timestamping
+	SoapyPlutoSDR_TimestampEvery::update_device_timestamp_every(dev, timestamp_every, channel_list.size());
 
 	// Assume direct copying is supported
 	direct_copy = true;
