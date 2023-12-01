@@ -220,12 +220,14 @@ int tx_streamer_ip_gadget::send(const void * const *buffs,
 			uint8_t *dst_ptr = curr_buffer->payload.data() + (curr_buffer_samples_stored * sample_size_bytes) + (sizeof(uint16_t) * k);
 
 			// note that TX expects samples MSB aligned, unlike RX which is LSB aligned
+			// Given two channels, caller provides a single buffer for I/Q sample pairs.
+			// Given four channels, caller provides two buffers. Channels 0,1 become I/Q pairs of buffer 0, Channels 2,3 become I/Q pairs of buffer 1.
 			if (format == PLUTO_SDR_CS16) {
 
 				int16_t *samples_cs16 = (int16_t *)buffs[index];
 
 				for (size_t j = 0; j < items; ++j) {
-					src = samples_cs16[j*2+k];
+					src = samples_cs16[j * 2 + (k % 2)];
 					iio_channel_convert_inverse(chn, dst_ptr, src_ptr);
 					dst_ptr += sample_size_bytes;
 				}
@@ -235,7 +237,7 @@ int tx_streamer_ip_gadget::send(const void * const *buffs,
 				float *samples_cf32 = (float *)buffs[index];
 
 				for (size_t j = 0; j < items; ++j) {
-					src = (int16_t)(samples_cf32[j*2+k] * 32767.999f); // 32767.999f (0x46ffffff) will ensure better distribution
+					src = (int16_t)(samples_cf32[j * 2 + (k % 2)] * 32767.999f); // 32767.999f (0x46ffffff) will ensure better distribution
 					iio_channel_convert_inverse(chn, dst_ptr, src_ptr);
 					dst_ptr += sample_size_bytes;
 				}
@@ -245,7 +247,7 @@ int tx_streamer_ip_gadget::send(const void * const *buffs,
 				int8_t *samples_cs8 = (int8_t *)buffs[index];
 
 				for (size_t j = 0; j < items; ++j) {
-					src = (int16_t)(samples_cs8[j*2+k] << 8);
+					src = (int16_t)(samples_cs8[j * 2 + (k % 2)] << 8);
 					iio_channel_convert_inverse(chn, dst_ptr, src_ptr);
 					dst_ptr += sample_size_bytes;
 				}

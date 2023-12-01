@@ -201,7 +201,7 @@ size_t rx_streamer_ip_gadget::recv(void * const *buffs,
 				for (size_t j = 0; j < items; ++j) {
 					iio_channel_convert(chn, conv_ptr, src);
 					src += sample_size_bytes;
-					dst_cs16[j * 2 + i] = conv;
+					dst_cs16[j * 2 + (i % 2)] = conv;
 				}
 			}
 			else if (format == PLUTO_SDR_CF32) {
@@ -211,7 +211,7 @@ size_t rx_streamer_ip_gadget::recv(void * const *buffs,
 				for (size_t j = 0; j < items; ++j) {
 					iio_channel_convert(chn, conv_ptr, src);
 					src += sample_size_bytes;
-					dst_cf32[j * 2 + i] = float(conv) / 2048.0f;
+					dst_cf32[j * 2 + (i % 2)] = float(conv) / 2048.0f;
 				}
 			}
 			else if (format == PLUTO_SDR_CS8) {
@@ -221,7 +221,7 @@ size_t rx_streamer_ip_gadget::recv(void * const *buffs,
 				for (size_t j = 0; j < items; ++j) {
 					iio_channel_convert(chn, conv_ptr, src);
 					src += sample_size_bytes;
-					dst_cs8[j * 2 + i] = int8_t(conv >> 4);
+					dst_cs8[j * 2 + (i % 2)] = int8_t(conv >> 4);
 				}
 			}
 
