@@ -4,6 +4,11 @@
 #include <stdlib.h> //free
 #include <stdint.h>
 
+static void check_channel(size_t sample_count, size_t channel_count,
+                          size_t channel_index,
+                          long long *tx_timestamps, long long *rx_timestamps,
+                          uint16_t** rx_buff,
+                          size_t rx_mtu);
 static long long extract_timestamp(uint16_t *rx_buff, size_t buff_size, size_t *inbound_ts_offset);
 
 int main(void)
@@ -48,14 +53,16 @@ int main(void)
     }
 
     //setup streams
-    SoapySDRStream *rxStream = SoapySDRDevice_setupStream(sdr, SOAPY_SDR_RX, SOAPY_SDR_CS16, NULL, 0, NULL);
+    size_t channels[] = {0, 1}; // {0} or {0, 1}
+    size_t channel_count = sizeof(channels) / sizeof(channels[0]);
+    SoapySDRStream *rxStream = SoapySDRDevice_setupStream(sdr, SOAPY_SDR_RX, SOAPY_SDR_CS16, channels, channel_count, NULL);
     if (rxStream == NULL)
     {
         printf("setupStream rx fail: %s\n", SoapySDRDevice_lastError());
         SoapySDRDevice_unmake(sdr);
         return EXIT_FAILURE;
     }
-    SoapySDRStream *txStream = SoapySDRDevice_setupStream(sdr, SOAPY_SDR_TX, SOAPY_SDR_CS16, NULL, 0, NULL);
+    SoapySDRStream *txStream = SoapySDRDevice_setupStream(sdr, SOAPY_SDR_TX, SOAPY_SDR_CS16, channels, channel_count, NULL);
     if (txStream == NULL)
     {
         printf("setupStream tx fail: %s\n", SoapySDRDevice_lastError());
@@ -76,10 +83,11 @@ int main(void)
 
     //create buffers for samples (unsigned signed int16's - although we're transmitting and receiving signed numbers)
     //double size for I and Q samples
-    uint16_t* rx_buff[sample_count];
+    uint16_t* rx_buff[sample_count][channel_count];
     for (size_t i = 0; i < sample_count; i++)
+    for (size_t j = 0; j < channel_count; j++)
     {
-        rx_buff[i] = malloc(sizeof(uint16_t)*2*rx_mtu);
+        rx_buff[i][j] = malloc(sizeof(uint16_t)*2*rx_mtu);
     }
     long long rx_timestamps[sample_count];
     uint16_t tx_buff[2*tx_mtu];
@@ -106,7 +114,7 @@ int main(void)
     //ensure buffers in device are empty
     for (size_t buffers_read = 0; buffers_read < 128; /* in loop */)
     {
-        void *buffs[] = {rx_buff[0]}; //array of buffers
+        void *buffs[] = {rx_buff[0][0], rx_buff[0][1]}; //array of buffers
         int flags; //flags set by receive operation
         long long timeNs; //timestamp for receive buffer
 
@@ -125,11 +133,12 @@ int main(void)
     long long last_time = 0;
     for (size_t buffers_read = 0; buffers_read < sample_count; buffers_read++)
     {
-        void *buffs[1]; //array of buffers
+        void *buffs[2]; //array of buffers
         int flags; //flags set by receive operation
         long long timeNs; //timestamp for receive buffer
 
-        buffs[0] = rx_buff[buffers_read];
+        buffs[0] = rx_buff[buffers_read][0];
+        buffs[1] = rx_buff[buffers_read][1];
         int sr = SoapySDRDevice_readStream(sdr, rxStream, buffs, rx_mtu, &flags, &timeNs, 100000);
         if (sr < 0)
         {
@@ -160,6 +169,7 @@ int main(void)
 
         // Send buffer
         buffs[0] = tx_buff;
+        buffs[1] = tx_buff;
         flags = SOAPY_SDR_HAS_TIME;
         int st = SoapySDRDevice_writeStream(sdr, txStream, (const void * const*)buffs, tx_mtu, &flags, tx_time, 100000);
         if ((size_t)st != tx_mtu)
@@ -180,13 +190,40 @@ int main(void)
     SoapySDRDevice_unmake(sdr);
 
     // Process each rx buffer, looking for transmitted timestamp
+    for (size_t j = 0; j < channel_count; j++)
+    {
+        printf("Checking channel %zu\n", j);
+        check_channel(sample_count, channel_count, j, tx_timestamps, rx_timestamps, (uint16_t**)rx_buff, rx_mtu);
+    }
+
+    //all done
+    printf("test complete!\n");
+
+    //free buffers
+    for (size_t i = 0; i < sample_count; i++)
+    for (size_t j = 0; j < channel_count; j++)
+    {
+        free(rx_buff[i][j]);
+        rx_buff[i][j] = NULL;
+    }
+
+    return EXIT_SUCCESS;
+}
+
+static void check_channel(size_t sample_count, size_t channel_count,
+                          size_t channel_index,
+                          long long *tx_timestamps, long long *rx_timestamps,
+                          uint16_t** rx_buff,
+                          size_t rx_mtu)
+{
+    // Process each rx buffer, looking for transmitted timestamp
     size_t last_ts_index = 0;
     size_t last_buff_index = 0;
     for (size_t index = 0; index < sample_count; index++)
     {
         // Split buffer and timestamp
         long long curr_rx_buffer_ts = rx_timestamps[index];
-        uint16_t* curr_rx_buffer_data = rx_buff[index];
+        uint16_t* curr_rx_buffer_data = rx_buff[(index * channel_count) + channel_index];
 
         // Search for timestamp
         size_t inbound_ts_offset;
@@ -231,18 +268,6 @@ int main(void)
             printf("Buffer %lu doesn't contain timestamp\n", index);
         }
     }
-
-    //all done
-    printf("test complete!\n");
-
-    //free buffers
-    for (size_t i = 0; i < sample_count; i++)
-    {
-        free(rx_buff[i]);
-        rx_buff[i] = NULL;
-    }
-
-    return EXIT_SUCCESS;
 }
 
 //declare state machine states

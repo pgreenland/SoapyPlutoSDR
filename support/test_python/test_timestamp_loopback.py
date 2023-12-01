@@ -49,8 +49,9 @@ def main():
     sdr.setFrequency(SOAPY_SDR_TX, 0, 800.0e6)
 
     # Setup a stream (signed int16's)
-    rxStream = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16)
-    txStream = sdr.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CS16)
+    channels = [0, 1] # [0] or [0, 1]
+    rxStream = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, channels)
+    txStream = sdr.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CS16, channels)
 
     # Get stream MTUs
     rx_mtu = int(sdr.getStreamMTU(rxStream))
@@ -64,7 +65,8 @@ def main():
 
     # Create a re-usable buffers for samples (unsigned signed int16's - although we're transmitting and receiving signed numbers)
     # double size for I and Q samples
-    rx_buff = numpy.array([0]*2*rx_mtu, numpy.ushort)
+    rx_buff0 = numpy.array([0]*2*rx_mtu, numpy.ushort)
+    rx_buff1 = numpy.array([0]*2*rx_mtu, numpy.ushort)
     tx_buff = numpy.array([0]*2*tx_mtu, numpy.ushort)
 
     # Prepare fixed bytes in transmit buffer
@@ -90,7 +92,7 @@ def main():
     buffers_read = 0
     while buffers_read < 16:
         # Read samples
-        sr = sdr.readStream(rxStream, [rx_buff], rx_mtu, timeoutUs=(100 * 1000)) # 100ms timeout
+        sr = sdr.readStream(rxStream, [rx_buff0, rx_buff1], rx_mtu, timeoutUs=(100 * 1000)) # 100ms timeout
         if sr.ret < 0:
             # Skip read on error (likely timeout)
             continue
@@ -103,9 +105,9 @@ def main():
     rx_buffers = []
     tx_times = []
     buffers_read = 0
-    while buffers_read < 20:
+    while buffers_read < 5000:
         # Read samples
-        sr = sdr.readStream(rxStream, [rx_buff], rx_mtu, timeoutUs=(100 * 1000)) # 100ms timeout
+        sr = sdr.readStream(rxStream, [rx_buff0, rx_buff1], rx_mtu, timeoutUs=(100 * 1000)) # 100ms timeout
         if sr.ret < 0:
             # Skip read on error (likely timeout)
             continue
@@ -118,7 +120,7 @@ def main():
         buffers_read += 1
 
         # Push current rx timestamp and buffer into queue
-        rx_buffers.append((sr.timeNs, numpy.array(rx_buff, copy=True)))
+        rx_buffers.append((sr.timeNs, [numpy.array(rx_buff0, copy=True), numpy.array(rx_buff1, copy=True)]))
 
         # Calculate transmit time 4ms in future
         tx_time = sr.timeNs + (4 * 1000 * 1000)
@@ -139,7 +141,7 @@ def main():
             tx_time_hex += f"{tx_time_byte:02x}"
 
         # Send buffer
-        res = sdr.writeStream(txStream, [tx_buff], tx_mtu, SOAPY_SDR_HAS_TIME, tx_time, timeoutUs=(100 * 1000)) # 100ms timeout
+        res = sdr.writeStream(txStream, [tx_buff, tx_buff], tx_mtu, SOAPY_SDR_HAS_TIME, tx_time, timeoutUs=(100 * 1000)) # 100ms timeout
         if res.ret != tx_mtu:
             raise Exception('transmit failed %s' % str(res))
 
@@ -147,8 +149,10 @@ def main():
         f.write(f"RX timeNs (DEC):{sr.timeNs}\n")
         f.write(f"TX timeNs (DEC):{tx_time}\n".format())
         f.write(f"TX timeNs (HEX):{tx_time_hex}\n")
-        hex_str = rx_buff.tobytes().hex('\n', 64)
-        f.write(f"RX Data:\n{hex_str}\n")
+        hex_str = rx_buff0.tobytes().hex('\n', 64)
+        f.write(f"RX Data[0]:\n{hex_str}\n")
+        hex_str = rx_buff1.tobytes().hex('\n', 64)
+        f.write(f"RX Data[1]:\n{hex_str}\n")
 
     # Close file
     f.close()
@@ -162,10 +166,23 @@ def main():
     sdr.closeStream(rxStream)
 
     # Process each rx buffer, looking for transmitted timestamp
+    for i in range(len(channels)):
+        print(f"Checking channel {i}")
+        check_channel(i, rx_buffers, tx_times)
+
+    # All done
+    print("test complete!")
+
+def check_channel(channel_index, rx_buffers, tx_times):
+    """Check samples for single channel"""
+
     last_index = 0
     for index in range(len(rx_buffers)):
         # Split buffer and timestamp
         curr_rx_buffer_ts, curr_rx_buffer_data = rx_buffers[index]
+
+        # Select channel
+        curr_rx_buffer_data = curr_rx_buffer_data[channel_index]
 
         # Search for timestamp
         inbound_ts_value, inbound_ts_offset = extract_timestamp(curr_rx_buffer_data)
@@ -176,29 +193,24 @@ def main():
             try:
                 tx_times_index = tx_times.index(inbound_ts_value)
             except ValueError:
-                printf("Inbound timestamp {} not found in outbound list".format(inbound_ts_value))
+                print(f"Inbound timestamp {inbound_ts_value} not found in outbound list")
                 tx_times_index = -1
 
             if -1 != tx_times_index:
                 # Found TX entry
-                print("Buffer {} contains TX TS after {} buffers, TX TS queue index {}, buffer word index {}".format(index, index - last_index, tx_times_index, inbound_ts_offset))
+                print(f"Buffer {index} contains TX TS after {index - last_index} buffers, TX TS queue index {tx_times_index}, buffer word index {inbound_ts_offset}")
                 if (curr_rx_buffer_ts != inbound_ts_value):
                     print("RX timestamp doesn't match TX timestamp....it should")
-
-                # Pop tx entry
-                tx_times.pop(tx_times_index)
 
                 # Update last offset
                 last_index = index
             else:
-                # TX entry not found
-                print("Buffer {} contains a TX timestamp which isn't in TX TS the queue".format(index))
+                # TX entry not found, search for closest match
+                closest_tx_ts = min(tx_times, key=lambda x:abs(x-inbound_ts_value))
+                print(f"Buffer {index} contains a TX timestamp which isn't in TX TS the queue, closest tx ts is {closest_tx_ts} away")
         else:
             # Buffer doesn't contain timestamp
-            print("Buffer {} doesn't contain timestamp".format(index))
-
-    # All done
-    print("test complete!")
+            print(f"Buffer {index} doesn't contain timestamp")
 
 # Declare state machine states
 class States(enum.Enum):
