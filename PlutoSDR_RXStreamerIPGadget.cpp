@@ -19,7 +19,7 @@
 #include "sdr_ip_gadget_types.h"
 
 rx_streamer_ip_gadget::rx_streamer_ip_gadget(const iio_device *_dev, int _sock_control, int _sock_data, size_t _udp_packet_size, const plutosdrStreamFormat _format, const std::vector<size_t> &channels, const SoapySDR::Kwargs &args, uint32_t _timestamp_every):
-	dev(_dev), sock_control(_sock_control), sock_data(_sock_data), udp_packet_size(_udp_packet_size), format(_format), timestamp_every(_timestamp_every), queue(16, true)
+	dev(_dev), sock_control(_sock_control), sock_data(_sock_data), udp_packet_size(_udp_packet_size), format(_format), timestamp_every(_timestamp_every), thread_stop(false), queue(16, true)
 
 {
 	//default to channel 0, if none were specified
@@ -101,9 +101,6 @@ rx_streamer_ip_gadget::rx_streamer_ip_gadget(const iio_device *_dev, int _sock_c
 
 	// Report status
 	SoapySDR_logf(SOAPY_SDR_INFO, "Has direct RX copy: %d", (int)direct_copy);
-
-	// Reset current timestamp
-	curr_buffer_timestamp = 0;
 }
 
 rx_streamer_ip_gadget::~rx_streamer_ip_gadget()
