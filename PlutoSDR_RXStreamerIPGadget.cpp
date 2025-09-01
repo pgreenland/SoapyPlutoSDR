@@ -431,12 +431,8 @@ void rx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 			block_index = 0;
 			block_count = hdr.block_count;
 
-			/* Is timestamping enabled? */
-			if (timestamp_every)
-			{
-				/* Yes, copy timestamp from header to working data */
-				last_seqno = hdr.seqno;
-			}
+			/* Copy timestamp from header to working data */
+			last_seqno = hdr.seqno;
 		}
 		else
 		{
