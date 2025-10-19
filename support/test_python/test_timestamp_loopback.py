@@ -20,19 +20,30 @@ export SRSRAN_INSTALL=${HOME}/srsRAN
 LD_LIBRARY_PATH=${SRSRAN_INSTALL}/lib PYTHONPATH=${SRSRAN_INSTALL}/lib/python3.8/site-packages python3 test_timestamp_loopback.py
 """
 
+import argparse
+import enum
+
 import SoapySDR
 from SoapySDR import * # SOAPY_SDR_ constants
 import numpy # Use numpy for buffers
-import enum
 
 def main():
     """Perform timestamp test"""
 
+    # Parse arguments
+    parser = argparse.ArgumentParser(description="SoapySDR Pluto Timestamp Loopback Test")
+    parser.add_argument("--uri", type=str, default="usb:", help="SoapySDR device URI")
+    parser.add_argument("--channels", type=int, default=1, choices=[1, 2], help="Number of channels to use (1 or 2)")
+    parser.add_argument("--buffer_count", type=int, default=10000, help="Number of buffers to transmit/receive")
+    cmd_line_args = parser.parse_args()
+
+    # Print selected values for visibility
+    print(f"Selected URI: {cmd_line_args.uri}")
+    print(f"Selected channels: {cmd_line_args.channels}")
+    print(f"Selected buffer count: {cmd_line_args.buffer_count}")
+
     # Prepare device instance arguments
-    if 0:
-        args = dict(driver="plutosdr", uri="usb:", direct="1", timestamp_every="1920", loopback="1")
-    else:
-        args = dict(driver="plutosdr", uri="ip:pluto", direct="1", udp_packet_size="1472", timestamp_every="1920", loopback="1")
+    args = dict(driver="plutosdr", uri=cmd_line_args.uri, direct="1", udp_packet_size="1472", timestamp_every="1920", loopback="1")
 
     # Enumerate devices using arguments as a search string
     results = SoapySDR.Device.enumerate(args)
@@ -49,7 +60,7 @@ def main():
     sdr.setFrequency(SOAPY_SDR_TX, 0, 800.0e6)
 
     # Setup a stream (signed int16's)
-    channels = [0, 1] # [0] or [0, 1]
+    channels = [0, 1] if cmd_line_args.channels == 2 else [0]
     rxStream = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, channels)
     txStream = sdr.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CS16, channels)
 
@@ -105,7 +116,7 @@ def main():
     rx_buffers = []
     tx_times = []
     buffers_read = 0
-    while buffers_read < 5000:
+    while buffers_read < cmd_line_args.buffer_count:
         # Read samples
         sr = sdr.readStream(rxStream, [rx_buff0, rx_buff1], rx_mtu, timeoutUs=(100 * 1000)) # 100ms timeout
         if sr.ret < 0:
