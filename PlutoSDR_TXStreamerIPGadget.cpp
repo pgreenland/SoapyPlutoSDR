@@ -428,9 +428,9 @@ void tx_streamer_ip_gadget::thread_func(uint32_t curr_enabled_channels, uint32_t
 	}
 
 	// Free buffers
-	delete arr_mmsg_hdrs;
-	delete arr_iovs;
-	delete arr_pkt_hdrs;
+	delete[] arr_mmsg_hdrs;
+	delete[] arr_iovs;
+	delete[] arr_pkt_hdrs;
 
 	// Stop stream
 	cmd.hdr.magic = SDR_IP_GADGET_MAGIC;
